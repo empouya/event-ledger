@@ -1,0 +1,8 @@
+# buildspec.yml — AWS CodeBuild instructions for the CI/CD pipeline
+# Populated Later. Placeholder only.
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - echo "CI/CD - not yet implemented"

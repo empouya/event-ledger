@@ -1,0 +1,30 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: StreamCore event-processing pipeline
+
+
+# Globals apply default settings to ALL functions/APIs in this template.
+# This avoids repeating the same config on every resource.
+Globals:
+Conditions:
+    Function:
+        Runtime: python3.12
+        Architectures:
+        - X86_64
+        Tags:
+            Project: StreamCore
+            Environment: !Ref Environment
+
+
+# Parameters let you pass different values per environment (dev/staging/prod)
+# without changing the template itself.
+Parameters:
+    Environment:
+        Type: String
+        Default: dev
+        AllowedValues: [dev, staging, prod]
+        
+
+# Resources is where all AWS infrastructure is declared.
+Resources: {}

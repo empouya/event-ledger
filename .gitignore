@@ -1,0 +1,27 @@
+# SAM build output — generated every time you run sam build, never commit it
+.aws-sam/
+
+# Python bytecode — compiled cache files Python generates automatically
+__pycache__/
+*.py[cod]
+
+# Virtual environments — local dependency installs, not part of the repo
+.venv/
+venv/
+
+# Secrets and environment config — never commit credentials
+.env
+.env.*
+
+# IDE files — personal editor settings, irrelevant to teammates
+.vscode/
+.idea/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Test coverage reports — generated output, not source
+.coverage
+htmlcov/
+.pytest_cache/
