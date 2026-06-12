@@ -10,3 +10,4 @@ confirm_changeset    = true
 capabilities         = "CAPABILITY_IAM"
 parameters_overrides = "Environment=dev"
 tags                 = "Project=StreamCore Environment=dev"
+resolve_s3 = true

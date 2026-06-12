@@ -12,6 +12,7 @@ venv/
 # Secrets and environment config — never commit credentials
 .env
 .env.*
+dev-env.ps1
 
 # IDE files — personal editor settings, irrelevant to teammates
 .vscode/
