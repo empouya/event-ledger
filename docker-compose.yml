@@ -1,0 +1,35 @@
+# docker-compose.yml — LocalStack dev environment
+#
+# Runs LocalStack Community, which emulates AWS services locally.
+# This lets us develop and test the full pipeline for free, without
+# hitting real AWS. Kinesis, DynamoDB, Lambda, and API Gateway are
+# all emulated here.
+#
+# Usage:
+#   docker compose up -d        start in background
+#   docker compose down         stop and remove containers
+#   docker compose logs -f      follow logs
+
+
+services:
+    localstack:
+        image: localstack/localstack:4
+        container_name: streamcore-localstack
+        ports:
+            - "4566:4566"
+        environment:
+            - SERVICES=apigateway,lambda,kinesis,dynamodb,iam,s3,logs,sts,cloudformation
+            - AWS_DEFAULT_REGION=eu-west-1
+            - DEBUG=0
+        volumes:
+            - "/var/run/docker.sock:/var/run/docker.sock"
+            - localstack-data:/var/lib/localstack
+        healthcheck:
+            test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+            interval: 10s
+            timeout: 5s
+            retries: 10
+
+
+volumes:
+  localstack-data:

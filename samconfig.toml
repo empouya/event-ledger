@@ -1,8 +1,11 @@
 # samconfig.toml — deploy configuration per environment
-# Usage: sam deploy --config-env dev
+# Usage:
+#   sam deploy --config-env dev          deploy to real AWS (eu-west-1)
+#   samlocal deploy --config-env local   deploy to LocalStack on your machine
 
 version = 0.1
 
+# ── Real AWS (eu-west-1) ────────────────────────────────────────────────────
 [dev.deploy.parameters]
 stack_name           = "streamcore-dev"
 region               = "eu-west-1"
@@ -10,4 +13,17 @@ confirm_changeset    = true
 capabilities         = "CAPABILITY_IAM"
 parameters_overrides = "Environment=dev"
 tags                 = "Project=StreamCore Environment=dev"
-resolve_s3 = true
+resolve_s3           = true
+
+# ── LocalStack (local machine) ──────────────────────────────────────────────
+# samlocal is a thin wrapper around sam that rewrites all AWS endpoints
+# to point at localhost:4566 (the LocalStack gateway). Everything else
+# is identical to the real deploy — same template, same parameters.
+[local.deploy.parameters]
+stack_name           = "streamcore-local"
+region               = "eu-west-1"
+confirm_changeset    = false
+capabilities         = "CAPABILITY_IAM"
+parameters_overrides = "Environment=dev"
+tags                 = "Project=StreamCore Environment=dev"
+resolve_s3           = true
