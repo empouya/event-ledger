@@ -63,6 +63,35 @@ Resources:
                         RestApiId: !Ref StreamCoreApi
                         Path: /health
                         Method: GET
+    # Ingest Lambda — hot-path entry point for POST /v1/events.
+    # Receives the event body, stamps it with tenantId/ingestionId/ingestedAt,
+    # and writes one Kinesis record. Must be lightweight — no heavy logic here.
+    IngestFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            CodeUri: functions/ingest/
+            Handler: handler.lambda_handler
+            Description: Accepts POST /v1/events, injects ingestion metadata, writes to Kinesis
+            Timeout: 10         # seconds — well above p99 even under load
+            MemorySize: 256     # MB — sufficient for a simple Kinesis PutRecord call
+            Environment:
+                Variables:
+                    # Stream name from CloudFormation — never hardcoded.
+                    # !Ref on a Kinesis stream returns its name (not ARN).
+                    EVENT_STREAM_NAME: !Ref EventStream
+            Policies:
+                # Least-privilege: only the one action this function actually calls.
+                - Statement:
+                    - Effect: Allow
+                      Action: kinesis:PutRecord
+                      Resource: !GetAtt EventStream.Arn
+            Events:
+                IngestPost:
+                    Type: Api
+                    Properties:
+                        RestApiId: !Ref StreamCoreApi
+                        Path: /v1/events
+                        Method: POST
 
     # Durable buffer between the ingestion API and the Consumer Lambda.
     # Kinesis holds events for RetentionPeriodHours, decoupling how fast
