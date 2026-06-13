@@ -23,7 +23,7 @@ Parameters:
         Type: String
         Default: dev
         AllowedValues: [dev, staging, prod]
-        
+
 
 # Resources is where all AWS infrastructure is declared.
 Resources:
