@@ -23,29 +23,66 @@ Parameters:
         Type: String
         Default: dev
         AllowedValues: [dev, staging, prod]
+    ShardCount:
+        Type: Number
+        Default: 1
+        Description: >
+            Number of Kinesis shards. 1 shard handles up to 1,000 events/sec write
+            or 1 MB/sec write. Keep at 1 for LocalStack; increase for real AWS
+            when approaching those throughput limits.
+
+    RetentionPeriodHours:
+        Type: Number
+        Default: 24
+        Description: >
+            How long Kinesis retains events (hours). The spec requires 168h (7 days)
+            in production for replay guarantees. Using 24h locally because LocalStack
+            does not enforce retention and this keeps the local/real split honest.
 
 
 # Resources is where all AWS infrastructure is declared.
 Resources:
+    # The API Gateway that exposes HTTP endpoints to the internet.
+    # SAM creates and manages the underlying API Gateway resource automatically.
+    StreamCoreApi:
+        Type: AWS::Serverless::Api
+        Properties:
+            StageName: !Ref Environment   # URL will be: .../dev/health
 
-  # The API Gateway that exposes HTTP endpoints to the internet.
-  # SAM creates and manages the underlying API Gateway resource automatically.
-  StreamCoreApi:
-    Type: AWS::Serverless::Api
-    Properties:
-      StageName: !Ref Environment   # URL will be: .../dev/health
+    # The Lambda function that handles GET /health requests.
+    HealthFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            CodeUri: functions/health/    # Folder SAM packages and uploads to S3
+            Handler: handler.lambda_handler  # filename.function_name
+            Description: Returns HTTP 200 to confirm the API and Lambda are operational
+            Events:
+                HealthGet:
+                    Type: Api
+                    Properties:
+                        RestApiId: !Ref StreamCoreApi
+                        Path: /health
+                        Method: GET
 
-  # The Lambda function that handles GET /health requests.
-  HealthFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: functions/health/    # Folder SAM packages and uploads to S3
-      Handler: handler.lambda_handler  # filename.function_name
-      Description: Returns HTTP 200 to confirm the API and Lambda are operational
-      Events:
-        HealthGet:
-          Type: Api
-          Properties:
-            RestApiId: !Ref StreamCoreApi
-            Path: /health
-            Method: GET
+    # Durable buffer between the ingestion API and the Consumer Lambda.
+    # Kinesis holds events for RetentionPeriodHours, decoupling how fast
+    # we accept events from how fast we can process them.
+    #
+    # Partition key strategy: tenantId (set by the Ingest Lambda on PutRecord).
+    # All events from the same tenant land on the same shard, so their relative
+    # order is preserved — essential for correct per-tenant event sequencing.
+    #
+    # Hot-partition note: if one tenant generates dramatically more traffic than
+    # others, its shard becomes a bottleneck. Acceptable at this scale; revisit
+    # with Application Auto Scaling at higher volumes.
+    EventStream:
+        Type: AWS::Kinesis::Stream
+        Properties:
+            Name: !Sub "streamcore-events-${Environment}"
+            ShardCount: !Ref ShardCount
+            RetentionPeriodHours: !Ref RetentionPeriodHours
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
