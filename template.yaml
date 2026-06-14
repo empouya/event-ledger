@@ -56,6 +56,16 @@ Resources:
             CodeUri: functions/health/    # Folder SAM packages and uploads to S3
             Handler: handler.lambda_handler  # filename.function_name
             Description: Returns HTTP 200 to confirm the API and Lambda are operational
+            Environment:
+                Variables:
+                    # !Ref on a DynamoDB table returns the table name.
+                    # Injected here so the handler never hardcodes it.
+                    TABLE_NAME: !Ref EventsTable
+            Policies:
+                - Statement:
+                    - Effect: Allow
+                      Action: dynamodb:DescribeTable
+                      Resource: !GetAtt EventsTable.Arn
             Events:
                 HealthGet:
                     Type: Api
