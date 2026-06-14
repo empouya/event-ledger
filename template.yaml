@@ -93,6 +93,42 @@ Resources:
                         Path: /v1/events
                         Method: POST
 
+# Consumer Lambda — reads from Kinesis in batches and writes to DynamoDB.
+    # This is the only writer to EventsTable; the Ingest Lambda never touches DynamoDB.
+    #
+    # BatchSize 100 / window 5s: Kinesis will call this function when it has
+    # 100 records OR 5 seconds have passed, whichever comes first.
+    # BisectBatchOnFunctionError: on any unhandled exception, Kinesis splits the
+    # batch in half and retries each half separately — isolating bad records
+    # without replaying the entire batch from scratch.
+    ConsumerFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            CodeUri: functions/consumer/
+            Handler: handler.lambda_handler
+            Description: Reads Kinesis batches, enriches events, writes to DynamoDB
+            Timeout: 60
+            MemorySize: 256
+            Environment:
+                Variables:
+                    # !Ref on a DynamoDB table returns its name.
+                    TABLE_NAME: !Ref EventsTable
+            Policies:
+                - Statement:
+                    - Effect: Allow
+                      Action: dynamodb:PutItem
+                      Resource: !GetAtt EventsTable.Arn
+            Events:
+                KinesisStream:
+                    Type: Kinesis
+                    Properties:
+                        Stream: !GetAtt EventStream.Arn
+                        StartingPosition: LATEST
+                        BatchSize: 100
+                        MaximumBatchingWindowInSeconds: 5
+                        BisectBatchOnFunctionError: true
+
+
     # Durable buffer between the ingestion API and the Consumer Lambda.
     # Kinesis holds events for RetentionPeriodHours, decoupling how fast
     # we accept events from how fast we can process them.
