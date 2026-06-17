@@ -138,6 +138,88 @@ Resources:
                         MaximumBatchingWindowInSeconds: 5
                         BisectBatchOnFunctionError: true
 
+    # CloudWatch log group for the Step Functions state machine.
+    #
+    # EXPRESS executions have no built-in console history — the only way
+    # to observe what happened inside an execution is CloudWatch Logs.
+    # IncludeExecutionData: true means the full input/output of each state
+    # is written to the log, which is essential for debugging.
+    ProcessingStateMachineLogs:
+        Type: AWS::Logs::LogGroup
+        Properties:
+            LogGroupName: !Sub "/aws/states/streamcore-processing-${Environment}"
+            RetentionInDays: 30
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
+    # Validator Lambda — Step 1 of the processing workflow.
+    # Receives the full event envelope and raises ValidationError
+    # if any field fails the schema or business rules.
+    # No environment variables needed here — all config is in code constants.
+    ValidatorFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            CodeUri: functions/validator/
+            Handler: handler.lambda_handler
+            Description: Validates event envelope and type-specific fields
+            Timeout: 10
+            MemorySize: 256
+
+    # Step Functions state machine — orchestrates the four-step processing
+    # workflow: validate → hash PII → enrich → persist.
+    #
+    # Type EXPRESS:
+    #   - Built for high-volume, short-lived (< 5 min) executions.
+    #   - Significantly cheaper than STANDARD for per-event invocations.
+    #   - No built-in execution history; CloudWatch logging is mandatory.
+    #   - Supports start-sync-execution (returns result synchronously),
+    #     which STANDARD does not — useful for request/response patterns.
+    #
+    # Notice: Now we choose Standard to have more descriptions for testing!
+    #
+    # DefinitionSubstitutions injects the Lambda ARN into the ASL file at
+    # deploy time, replacing ${ValidatorFunctionArn} with the real ARN.
+    # This keeps ARNs out of the ASL and lets CloudFormation manage them.
+    ProcessingStateMachine:
+        Type: AWS::Serverless::StateMachine
+        Properties:
+            DefinitionUri: statemachines/processing.asl.json
+            DefinitionSubstitutions:
+                ValidatorFunctionArn: !GetAtt ValidatorFunction.Arn
+            Type: STANDARD
+            Logging:
+                Destinations:
+                    - CloudWatchLogsLogGroup:
+                        LogGroupArn: !GetAtt ProcessingStateMachineLogs.Arn
+                IncludeExecutionData: true
+                Level: ALL
+            Policies:
+                - Statement:
+                    - Effect: Allow
+                      Action: lambda:InvokeFunction
+                      Resource: !GetAtt ValidatorFunction.Arn
+                    # CloudWatch log delivery requires these nine actions.
+                    # None of them support resource-level constraints — AWS
+                    # mandates Resource: '*' for CreateLogDelivery and its siblings.
+                    - Effect: Allow
+                      Action:
+                          - logs:CreateLogDelivery
+                          - logs:GetLogDelivery
+                          - logs:UpdateLogDelivery
+                          - logs:DeleteLogDelivery
+                          - logs:ListLogDeliveries
+                          - logs:PutLogEvents
+                          - logs:PutResourcePolicy
+                          - logs:DescribeResourcePolicies
+                          - logs:DescribeLogGroups
+                      Resource: "*"
+            Tags:
+                Project: StreamCore
+                Environment: !Ref Environment
+
 
     # Durable buffer between the ingestion API and the Consumer Lambda.
     # Kinesis holds events for RetentionPeriodHours, decoupling how fast
@@ -211,3 +293,8 @@ Resources:
                   Value: StreamCore
                 - Key: Environment
                   Value: !Ref Environment
+
+Outputs:
+    ProcessingStateMachineArn:
+        Description: ARN of the event processing state machine
+        Value: !GetAtt ProcessingStateMachine.Arn

@@ -1,0 +1,48 @@
+{
+    "Comment": "Validates, hashes PII, enriches, and persists each incoming event through four ordered steps.",
+    "StartAt": "ValidateSchema",
+    "States": {
+        "ValidateSchema": {
+            "Type": "Task",
+            "Resource": "${ValidatorFunctionArn}",
+            "ResultPath": "$",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "ValidationError"
+                    ],
+                    "ResultPath": "$.rejectionDetail",
+                    "Next": "EventRejected"
+                }
+            ],
+            "Next": "HashPii"
+        },
+        "HashPii": {
+            "Type": "Pass",
+            "Next": "EnrichEvent"
+        },
+        "EnrichEvent": {
+            "Type": "Pass",
+            "Next": "PersistEvent"
+        },
+        "PersistEvent": {
+            "Type": "Pass",
+            "Next": "EventProcessed"
+        },
+        "EventProcessed": {
+            "Type": "Pass",
+            "Parameters": {
+                "status": "processed"
+            },
+            "End": true
+        },
+        "EventRejected": {
+            "Type": "Pass",
+            "Parameters": {
+                "status": "rejected",
+                "rejectionDetail.$": "$.rejectionDetail"
+            },
+            "End": true
+        }
+    }
+}
