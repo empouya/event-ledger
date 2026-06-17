@@ -21,7 +21,6 @@ services:
             - SERVICES=apigateway,lambda,kinesis,dynamodb,iam,s3,logs,sts,cloudformation, stepfunctions, secretsmanager
             - AWS_DEFAULT_REGION=eu-west-1
             - DEBUG=0
-            - PERSISTENCE=1
         volumes:
             - "/var/run/docker.sock:/var/run/docker.sock"
             - localstack-data:/var/lib/localstack

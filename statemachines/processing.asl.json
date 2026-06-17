@@ -24,7 +24,9 @@
             "Next": "EnrichEvent"
         },
         "EnrichEvent": {
-            "Type": "Pass",
+            "Type": "Task",
+            "Resource": "${EnricherFunctionArn}",
+            "ResultPath": "$",
             "Next": "PersistEvent"
         },
         "PersistEvent": {

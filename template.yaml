@@ -187,6 +187,21 @@ Resources:
                       Action: secretsmanager:GetSecretValue
                       Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:streamcore/pii-salt/*"
 
+    # Enricher Lambda — Step 3 of the processing workflow.
+    # Adds processedAt, pipelineVersion, and schemaVersionUsed to the event.
+    # These are pipeline-side facts the client SDK cannot set.
+    EnricherFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            CodeUri: functions/enricher/
+            Handler: handler.lambda_handler
+            Description: Adds processedAt, pipelineVersion, and schemaVersionUsed to the event
+            Timeout: 10
+            MemorySize: 256
+            Environment:
+                Variables:
+                    PIPELINE_VERSION: "2.0.0"
+
     # Step Functions state machine — orchestrates the four-step processing
     # workflow: validate → hash PII → enrich → persist.
     #
@@ -209,6 +224,7 @@ Resources:
             DefinitionSubstitutions:
                 ValidatorFunctionArn: !GetAtt ValidatorFunction.Arn
                 PiiExtractorFunctionArn: !GetAtt PiiExtractorFunction.Arn
+                EnricherFunctionArn: !GetAtt EnricherFunction.Arn
             Type: STANDARD
             Logging:
                 Destinations:
@@ -223,6 +239,7 @@ Resources:
                       Resource:
                           - !GetAtt ValidatorFunction.Arn
                           - !GetAtt PiiExtractorFunction.Arn
+                          - !GetAtt EnricherFunction.Arn
                     # CloudWatch log delivery requires these nine actions.
                     # None of them support resource-level constraints — AWS
                     # mandates Resource: '*' for CreateLogDelivery and its siblings.
