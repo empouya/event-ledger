@@ -202,6 +202,32 @@ Resources:
                 Variables:
                     PIPELINE_VERSION: "2.0.0"
 
+
+    # Writer Lambda — Step 4 of the processing workflow.
+    # Persists the enriched event to DynamoDB (queryable) and S3 (archive).
+    # DynamoDB write is idempotent: attribute_not_exists(PK) condition
+    # suppresses duplicate writes on Lambda retries.
+    WriterFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            CodeUri: functions/writer/
+            Handler: handler.lambda_handler
+            Description: Writes processed events to DynamoDB and S3; idempotent via conditional put
+            Timeout: 15
+            MemorySize: 256
+            Environment:
+                Variables:
+                    TABLE_NAME: !Ref EventsTable
+                    EVENTS_BUCKET: !Ref EventsBucket
+            Policies:
+                - Statement:
+                    - Effect: Allow
+                      Action: dynamodb:PutItem
+                      Resource: !GetAtt EventsTable.Arn
+                    - Effect: Allow
+                      Action: s3:PutObject
+                      Resource: !Sub "${EventsBucket.Arn}/*"
+
     # Step Functions state machine — orchestrates the four-step processing
     # workflow: validate → hash PII → enrich → persist.
     #
@@ -225,6 +251,7 @@ Resources:
                 ValidatorFunctionArn: !GetAtt ValidatorFunction.Arn
                 PiiExtractorFunctionArn: !GetAtt PiiExtractorFunction.Arn
                 EnricherFunctionArn: !GetAtt EnricherFunction.Arn
+                WriterFunctionArn: !GetAtt WriterFunction.Arn
             Type: STANDARD
             Logging:
                 Destinations:
@@ -240,6 +267,7 @@ Resources:
                           - !GetAtt ValidatorFunction.Arn
                           - !GetAtt PiiExtractorFunction.Arn
                           - !GetAtt EnricherFunction.Arn
+                          - !GetAtt WriterFunction.Arn
                     # CloudWatch log delivery requires these nine actions.
                     # None of them support resource-level constraints — AWS
                     # mandates Resource: '*' for CreateLogDelivery and its siblings.
@@ -277,6 +305,20 @@ Resources:
             Name: !Sub "streamcore-events-${Environment}"
             ShardCount: !Ref ShardCount
             RetentionPeriodHours: !Ref RetentionPeriodHours
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
+    # Raw event archive. Every processed event is written here as a JSON
+    # object partitioned by tenantId/eventType/date/eventId.json.
+    # Date partitioning lets Athena prune queries to a single day's prefix
+    # without scanning the full bucket.
+    EventsBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+            BucketName: !Sub "streamcore-events-raw-${Environment}"
             Tags:
                 - Key: Project
                   Value: StreamCore

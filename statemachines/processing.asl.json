@@ -30,7 +30,9 @@
             "Next": "PersistEvent"
         },
         "PersistEvent": {
-            "Type": "Pass",
+            "Type": "Task",
+            "Resource": "${WriterFunctionArn}",
+            "ResultPath": "$",
             "Next": "EventProcessed"
         },
         "EventProcessed": {
