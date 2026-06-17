@@ -168,6 +168,25 @@ Resources:
             Timeout: 10
             MemorySize: 256
 
+    # PII Extractor Lambda — Step 2 of the processing workflow.
+    # Receives the validated event envelope, fetches the per-tenant
+    # HMAC-SHA256 salt from Secrets Manager, and replaces every PII
+    # field in the payload with its digest. Raw values are never logged
+    # or returned.
+    PiiExtractorFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            CodeUri: functions/pii_extractor/
+            Handler: handler.lambda_handler
+            Description: Replaces PII field values with HMAC-SHA256 digests keyed by tenant salt
+            Timeout: 10
+            MemorySize: 256
+            Policies:
+                - Statement:
+                    - Effect: Allow
+                      Action: secretsmanager:GetSecretValue
+                      Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:streamcore/pii-salt/*"
+
     # Step Functions state machine — orchestrates the four-step processing
     # workflow: validate → hash PII → enrich → persist.
     #
@@ -189,6 +208,7 @@ Resources:
             DefinitionUri: statemachines/processing.asl.json
             DefinitionSubstitutions:
                 ValidatorFunctionArn: !GetAtt ValidatorFunction.Arn
+                PiiExtractorFunctionArn: !GetAtt PiiExtractorFunction.Arn
             Type: STANDARD
             Logging:
                 Destinations:
@@ -200,7 +220,9 @@ Resources:
                 - Statement:
                     - Effect: Allow
                       Action: lambda:InvokeFunction
-                      Resource: !GetAtt ValidatorFunction.Arn
+                      Resource:
+                          - !GetAtt ValidatorFunction.Arn
+                          - !GetAtt PiiExtractorFunction.Arn
                     # CloudWatch log delivery requires these nine actions.
                     # None of them support resource-level constraints — AWS
                     # mandates Resource: '*' for CreateLogDelivery and its siblings.

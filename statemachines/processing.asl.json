@@ -18,7 +18,9 @@
             "Next": "HashPii"
         },
         "HashPii": {
-            "Type": "Pass",
+            "Type": "Task",
+            "Resource": "${PiiExtractorFunctionArn}",
+            "ResultPath": "$",
             "Next": "EnrichEvent"
         },
         "EnrichEvent": {
