@@ -103,7 +103,7 @@ Resources:
                         Path: /v1/events
                         Method: POST
 
-# Consumer Lambda — reads from Kinesis in batches and writes to DynamoDB.
+    # Consumer Lambda — reads from Kinesis in batches and writes to DynamoDB.
     # This is the only writer to EventsTable; the Ingest Lambda never touches DynamoDB.
     #
     # BatchSize 100 / window 5s: Kinesis will call this function when it has
@@ -116,18 +116,17 @@ Resources:
         Properties:
             CodeUri: functions/consumer/
             Handler: handler.lambda_handler
-            Description: Reads Kinesis batches, enriches events, writes to DynamoDB
+            Description: Decodes Kinesis records and starts one Step Functions execution per event
             Timeout: 60
             MemorySize: 256
             Environment:
                 Variables:
-                    # !Ref on a DynamoDB table returns its name.
-                    TABLE_NAME: !Ref EventsTable
+                    STATE_MACHINE_ARN: !Ref ProcessingStateMachine
             Policies:
                 - Statement:
                     - Effect: Allow
-                      Action: dynamodb:PutItem
-                      Resource: !GetAtt EventsTable.Arn
+                      Action: states:StartExecution
+                      Resource: !Ref ProcessingStateMachine
             Events:
                 KinesisStream:
                     Type: Kinesis
