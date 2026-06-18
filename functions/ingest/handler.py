@@ -1,10 +1,12 @@
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 
 import boto3
+from botocore.exceptions import ClientError
 
 # Structured JSON logging — every entry is a parseable JSON object so
 # CloudWatch can index individual fields (level, request_id, tenant_id, etc.).
@@ -19,6 +21,11 @@ kinesis = boto3.client("kinesis", region_name=os.environ.get("AWS_REGION", "eu-w
 # Stream name injected via environment variable so we never hardcode it.
 # The template passes !Ref EventStream here, which gives us the stream name.
 STREAM_NAME = os.environ["EVENT_STREAM_NAME"]
+
+# Kinesis back-off config (FR-STR-02).
+# 3 attempts total; delays of 1s and 2s between them.
+_MAX_KINESIS_ATTEMPTS = 3
+_KINESIS_BASE_DELAY_S = 1
 
 
 def lambda_handler(event, context):
@@ -88,14 +95,25 @@ def lambda_handler(event, context):
         "ingestion_id": ingestion_id,
     }))
 
-    # ── 4. Write to Kinesis ───────────────────────────────────────────────
+    # ── 4. Write to Kinesis (with retry) ──────────────────────────────────
     # PartitionKey = tenantId so all events from the same tenant land on
     # the same shard, preserving intra-tenant ordering (FR-STR-01).
-    kinesis.put_record(
-        StreamName=STREAM_NAME,
-        PartitionKey=tenant_id,
-        Data=json.dumps(record).encode("utf-8"),
+    #
+    # FR-STR-02: retry up to _MAX_KINESIS_ATTEMPTS times with exponential
+    # back-off before returning 503. Transient throttling (Provisioned-
+    # ThroughputExceededException) and short service blips are absorbed
+    # here so the caller does not need to handle them.
+    write_ok = _put_record_with_retry(
+        stream_name=STREAM_NAME,
+        partition_key=tenant_id,
+        data=json.dumps(record).encode("utf-8"),
+        request_id=request_id,
+        tenant_id=tenant_id,
     )
+
+    if not write_ok:
+        return _error(503, "STREAM_UNAVAILABLE",
+                      "Event stream temporarily unavailable. Retry with exponential back-off.")
 
     logger.info(json.dumps({
         "message": "event accepted",
@@ -115,6 +133,98 @@ def lambda_handler(event, context):
             "timestamp": ingested_at,
         }),
     }
+
+
+def _put_record_with_retry(
+    stream_name: str,
+    partition_key: str,
+    data: bytes,
+    request_id: str,
+    tenant_id: str,
+) -> bool:
+    """
+    Attempt kinesis.put_record up to _MAX_KINESIS_ATTEMPTS times.
+
+    Delays between attempts: _KINESIS_BASE_DELAY_S × 2^attempt_index
+      attempt 0 → immediate
+      attempt 1 → sleep 1 s
+      attempt 2 → sleep 2 s
+
+    Returns True on success, False if all attempts fail.
+    On final failure emits a KinesisWriteFailure EMF metric.
+    """
+    last_exc = None
+
+    for attempt in range(_MAX_KINESIS_ATTEMPTS):
+        if attempt > 0:
+            delay = _KINESIS_BASE_DELAY_S * (2 ** (attempt - 1))
+            logger.warning(json.dumps({
+                "message": "kinesis put_record failed, retrying",
+                "request_id": request_id,
+                "tenant_id": tenant_id,
+                "attempt": attempt,
+                "retry_delay_s": delay,
+                "error_type": type(last_exc).__name__,
+                "error": str(last_exc),
+            }))
+            time.sleep(delay)
+
+        try:
+            kinesis.put_record(
+                StreamName=stream_name,
+                PartitionKey=partition_key,
+                Data=data,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+
+    # All attempts exhausted.
+    logger.error(json.dumps({
+        "message": "kinesis put_record failed after all retries, returning 503",
+        "request_id": request_id,
+        "tenant_id": tenant_id,
+        "attempts": _MAX_KINESIS_ATTEMPTS,
+        "error_type": type(last_exc).__name__,
+        "error": str(last_exc),
+    }))
+
+    # FR-STR-02: emit KinesisWriteFailure EMF metric so we can alarm on
+    # sustained write failures per tenant. CloudWatch Logs extracts this
+    # automatically — no additional IAM or infrastructure required.
+    _emit_kinesis_write_failure_metric(tenant_id)
+
+    return False
+
+
+def _emit_kinesis_write_failure_metric(tenant_id: str) -> None:
+    """
+    Emit one KinesisWriteFailure count metric via Embedded Metrics Format.
+
+    CloudWatch Logs scans each log line for the _aws.CloudWatchMetrics
+    structure and extracts declared metrics automatically. This is zero-
+    overhead compared to cloudwatch:PutMetricData and requires no extra
+    permissions — Lambda already has logs:PutLogEvents.
+    """
+    emf = {
+        "_aws": {
+            "Timestamp": int(time.time() * 1000),
+            "CloudWatchMetrics": [
+                {
+                    "Namespace": "StreamCore/Ingest",
+                    "Dimensions": [["TenantId"]],
+                    "Metrics": [
+                        {"Name": "KinesisWriteFailure", "Unit": "Count"},
+                    ],
+                }
+            ],
+        },
+        "TenantId": tenant_id,
+        "KinesisWriteFailure": 1,
+    }
+    # print (not logger) so the line reaches CloudWatch Logs unmodified —
+    # the logger adds a timestamp prefix that breaks EMF parsing.
+    print(json.dumps(emf))
 
 
 def _error(status_code, code, message):
