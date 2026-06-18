@@ -251,6 +251,8 @@ Resources:
                 PiiExtractorFunctionArn: !GetAtt PiiExtractorFunction.Arn
                 EnricherFunctionArn: !GetAtt EnricherFunction.Arn
                 WriterFunctionArn: !GetAtt WriterFunction.Arn
+                ValidationDLQUrl: !Ref ValidationDLQ
+                PersistenceDLQUrl: !Ref PersistenceDLQ
             Type: STANDARD
             Logging:
                 Destinations:
@@ -282,6 +284,11 @@ Resources:
                           - logs:DescribeResourcePolicies
                           - logs:DescribeLogGroups
                       Resource: "*"
+                    - Effect: Allow
+                      Action: sqs:SendMessage
+                      Resource:
+                          - !GetAtt ValidationDLQ.Arn
+                          - !GetAtt PersistenceDLQ.Arn
             Tags:
                 Project: StreamCore
                 Environment: !Ref Environment

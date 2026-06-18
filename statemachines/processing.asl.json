@@ -1,11 +1,24 @@
 {
-    "Comment": "Validates, hashes PII, enriches, and persists each incoming event through four ordered steps.",
+    "Comment": "Validates, hashes PII, enriches, and persists each incoming event. Transient Lambda errors retry with exponential back-off; permanent failures route to dead-letter queues.",
     "StartAt": "ValidateSchema",
     "States": {
         "ValidateSchema": {
             "Type": "Task",
             "Resource": "${ValidatorFunctionArn}",
             "ResultPath": "$",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException",
+                        "Lambda.TooManyRequestsException"
+                    ],
+                    "IntervalSeconds": 1,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
             "Catch": [
                 {
                     "ErrorEquals": [
@@ -21,18 +34,66 @@
             "Type": "Task",
             "Resource": "${PiiExtractorFunctionArn}",
             "ResultPath": "$",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException",
+                        "Lambda.TooManyRequestsException"
+                    ],
+                    "IntervalSeconds": 1,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
             "Next": "EnrichEvent"
         },
         "EnrichEvent": {
             "Type": "Task",
             "Resource": "${EnricherFunctionArn}",
             "ResultPath": "$",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException",
+                        "Lambda.TooManyRequestsException"
+                    ],
+                    "IntervalSeconds": 1,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
             "Next": "PersistEvent"
         },
         "PersistEvent": {
             "Type": "Task",
             "Resource": "${WriterFunctionArn}",
             "ResultPath": "$",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException",
+                        "Lambda.TooManyRequestsException"
+                    ],
+                    "IntervalSeconds": 1,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "SendToPersistenceDLQ"
+                }
+            ],
             "Next": "EventProcessed"
         },
         "EventProcessed": {
@@ -43,10 +104,32 @@
             "End": true
         },
         "EventRejected": {
+            "Comment": "Labelled pass-through — keeps this node visible in execution history before routing to the DLQ.",
             "Type": "Pass",
+            "ResultPath": null,
+            "Next": "SendToValidationDLQ"
+        },
+        "SendToValidationDLQ": {
+            "Comment": "Direct Step Functions → SQS integration. No Lambda needed. MessageBody is the full event envelope (including rejectionDetail) serialised to a JSON string.",
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sqs:sendMessage",
             "Parameters": {
-                "status": "rejected",
-                "rejectionDetail.$": "$.rejectionDetail"
+                "QueueUrl": "${ValidationDLQUrl}",
+                "MessageBody.$": "States.JsonToString($)",
+                "MessageGroupId": "validation-failures",
+                "MessageDeduplicationId.$": "$.ingestionId"
+            },
+            "End": true
+        },
+        "SendToPersistenceDLQ": {
+            "Comment": "Catches any PersistEvent failure after retries are exhausted. $.error holds the Step Functions error object; $.ingestionId is the dedup key.",
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sqs:sendMessage",
+            "Parameters": {
+                "QueueUrl": "${PersistenceDLQUrl}",
+                "MessageBody.$": "States.JsonToString($)",
+                "MessageGroupId": "persistence-failures",
+                "MessageDeduplicationId.$": "$.ingestionId"
             },
             "End": true
         }
