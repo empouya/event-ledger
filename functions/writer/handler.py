@@ -111,10 +111,23 @@ def lambda_handler(event: dict, context) -> dict:
     # ── S3 write ──────────────────────────────────────────────────────────────
     # S3 PutObject is naturally idempotent: writing the same key twice
     # overwrites with identical content — no duplicates are possible.
-    # Date partitioning (YYYY-MM-DD) enables Athena to prune to a single
-    # day's prefix rather than scanning the full bucket.
-    date_prefix = ingested_at[:10] if ingested_at else "unknown"
-    s3_key = f"{tenant_id}/{event_type}/{date_prefix}/{event_id}.json"
+    #
+    # Key format (§7, professor ruling): tenantId/eventType/year/month/day/hour/eventId.json
+    # Hour-granularity partitioning enables Athena to prune to a single hour's
+    # prefix and supports fine-grained replay without scanning the full bucket.
+    #
+    # User metadata (§7): three x-streamcore-* fields let tooling classify
+    # objects from head-object without downloading the body. AWS prepends
+    # "x-amz-meta-" when storing, so head-object returns x-amz-meta-x-streamcore-*.
+    if ingested_at and len(ingested_at) >= 13:
+        s3_year  = ingested_at[0:4]
+        s3_month = ingested_at[5:7]
+        s3_day   = ingested_at[8:10]
+        s3_hour  = ingested_at[11:13]
+    else:
+        s3_year = s3_month = s3_day = s3_hour = "unknown"
+
+    s3_key = f"{tenant_id}/{event_type}/{s3_year}/{s3_month}/{s3_day}/{s3_hour}/{event_id}.json"
 
     s3.put_object(
         Bucket=EVENTS_BUCKET,
@@ -122,6 +135,11 @@ def lambda_handler(event: dict, context) -> dict:
         Body=json.dumps(event).encode("utf-8"),
         ContentType="application/json",
         ServerSideEncryption="AES256",
+        Metadata={
+            "x-streamcore-tenant-id":     tenant_id,
+            "x-streamcore-event-type":    event_type,
+            "x-streamcore-schema-version": schema_version,
+        },
     )
 
     logger.info(json.dumps({

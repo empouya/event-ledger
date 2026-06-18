@@ -251,18 +251,14 @@ Resources:
     # Step Functions state machine — orchestrates the four-step processing
     # workflow: validate → hash PII → enrich → persist.
     #
-    # Type EXPRESS:
-    #   - Built for high-volume, short-lived (< 5 min) executions.
-    #   - Significantly cheaper than STANDARD for per-event invocations.
-    #   - No built-in execution history; CloudWatch logging is mandatory.
-    #   - Supports start-sync-execution (returns result synchronously),
-    #     which STANDARD does not — useful for request/response patterns.
+    # Type: STANDARD on LocalStack (enables execution-history API used in
+    # tests). Switch to EXPRESS on real AWS (cheaper per-event, < 5 min
+    # executions). See ADR-005 for the migration plan and caveats
+    # (dedup evaporation on EXPRESS; test coupling to history API).
     #
-    # Notice: Now we choose Standard to have more descriptions for testing!
-    #
-    # DefinitionSubstitutions injects the Lambda ARN into the ASL file at
-    # deploy time, replacing ${ValidatorFunctionArn} with the real ARN.
-    # This keeps ARNs out of the ASL and lets CloudFormation manage them.
+    # DefinitionSubstitutions injects ARNs and queue URLs from CloudFormation
+    # into the ASL at deploy time, replacing ${ValidatorFunctionArn} etc.
+    # This keeps references out of the ASL and lets CloudFormation manage them.
     ProcessingStateMachine:
         Type: AWS::Serverless::StateMachine
         Properties:
@@ -339,13 +335,41 @@ Resources:
                   Value: !Ref Environment
 
     # Raw event archive. Every processed event is written here as a JSON
-    # object partitioned by tenantId/eventType/date/eventId.json.
-    # Date partitioning lets Athena prune queries to a single day's prefix
-    # without scanning the full bucket.
+    # object partitioned by tenantId/eventType/year/month/day/hour/eventId.json.
+    # Hour-granularity partitioning lets Athena prune queries to a single
+    # hour's prefix without scanning the full bucket, and enables fine-grained
+    # replay (re-process one hour of events, not one day).
+    #
+    # Security: public access is blocked at the bucket level (defence-in-depth
+    # — even if a bucket policy is accidentally permissive, this blocks it).
+    # Bucket-default AES-256 encryption backs up the per-object SSE in the
+    # Writer Lambda — any future put_object that omits ServerSideEncryption
+    # is still encrypted.
+    #
+    # Lifecycle (§7): Standard → IA at 90 d → Glacier at 365 d → delete at 730 d.
     EventsBucket:
         Type: AWS::S3::Bucket
         Properties:
             BucketName: !Sub "streamcore-events-raw-${Environment}"
+            PublicAccessBlockConfiguration:
+                BlockPublicAcls: true
+                BlockPublicPolicy: true
+                IgnorePublicAcls: true
+                RestrictPublicBuckets: true
+            BucketEncryption:
+                ServerSideEncryptionConfiguration:
+                    - ServerSideEncryptionByDefault:
+                          SSEAlgorithm: AES256
+            LifecycleConfiguration:
+                Rules:
+                    - Id: streamcore-event-archive-lifecycle
+                      Status: Enabled
+                      Transitions:
+                          - TransitionInDays: 90
+                            StorageClass: STANDARD_IA
+                          - TransitionInDays: 365
+                            StorageClass: GLACIER
+                      ExpirationInDays: 730
             Tags:
                 - Key: Project
                   Value: StreamCore
@@ -354,15 +378,17 @@ Resources:
 
     # Queryable store for processed events.
     #
-    # Key design:
-    #   PK  = tenantId#eventType   — fast single-partition queries per tenant+type
-    #   SK  = processedAt#ingestionId — chronological sort; ingestionId ensures uniqueness
+    # Key design (ADR-007):
+    #   PK  = tenantId#eventType    — fast single-partition queries per tenant+type
+    #   SK  = ingestedAt#eventId    — stable across retries; eventId is UUID v4,
+    #                                  guaranteeing uniqueness within a partition
     #
     # GSI-1 lets you query all event types for a tenant across a time range,
     # e.g. "everything tenant X sent between 09:00 and 10:00".
+    #   GSI1PK = tenantId, GSI1SK = ingestedAt
     #
     # TTL on expiresAt: DynamoDB deletes items automatically after 90 days.
-    # The Consumer Lambda writes expiresAt as a Unix epoch integer.
+    # The Writer Lambda writes expiresAt as a Unix epoch integer.
     # Note: PITR and SSE-KMS are real-AWS hardening — LocalStack ignores them.
 
     EventsTable:
