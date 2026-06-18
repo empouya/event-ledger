@@ -452,6 +452,67 @@ Resources:
                 - Key: Environment
                   Value: !Ref Environment
 
+    # ── CloudWatch Alarms ─────────────────────────────────────────────────────
+    # Alert ops when either DLQ accumulates more than 10 messages.
+    # ApproximateNumberOfMessagesVisible is the current backlog depth.
+    # Maximum over 60 s catches a spike even if it resolves within the period.
+
+    ValidationDLQDepthAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmName: !Sub "streamcore-validation-dlq-depth-${Environment}"
+            AlarmDescription: >
+                ValidationDLQ depth exceeded 10 — schema validation failures
+                are accumulating. Investigate Validator Lambda errors.
+            Namespace: AWS/SQS
+            MetricName: ApproximateNumberOfMessagesVisible
+            Dimensions:
+                - Name: QueueName
+                  Value: !GetAtt ValidationDLQ.QueueName
+            Statistic: Maximum
+            Period: 60
+            EvaluationPeriods: 1
+            Threshold: 10
+            ComparisonOperator: GreaterThanThreshold
+            AlarmActions:
+                - !Ref OpsAlertsTopic
+            OKActions:
+                - !Ref OpsAlertsTopic
+            TreatMissingData: notBreaching
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
+    PersistenceDLQDepthAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmName: !Sub "streamcore-persistence-dlq-depth-${Environment}"
+            AlarmDescription: >
+                PersistenceDLQ depth exceeded 10 — persistence failures
+                are accumulating. Investigate Writer Lambda or DynamoDB errors.
+            Namespace: AWS/SQS
+            MetricName: ApproximateNumberOfMessagesVisible
+            Dimensions:
+                - Name: QueueName
+                  Value: !GetAtt PersistenceDLQ.QueueName
+            Statistic: Maximum
+            Period: 60
+            EvaluationPeriods: 1
+            Threshold: 10
+            ComparisonOperator: GreaterThanThreshold
+            AlarmActions:
+                - !Ref OpsAlertsTopic
+            OKActions:
+                - !Ref OpsAlertsTopic
+            TreatMissingData: notBreaching
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
 Outputs:
     ProcessingStateMachineArn:
         Description: ARN of the event processing state machine
