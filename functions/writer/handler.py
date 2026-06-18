@@ -121,6 +121,7 @@ def lambda_handler(event: dict, context) -> dict:
         Key=s3_key,
         Body=json.dumps(event).encode("utf-8"),
         ContentType="application/json",
+        ServerSideEncryption="AES256",
     )
 
     logger.info(json.dumps({
