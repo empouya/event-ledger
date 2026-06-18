@@ -127,6 +127,12 @@ Resources:
                     - Effect: Allow
                       Action: states:StartExecution
                       Resource: !Ref ProcessingStateMachine
+                    # Required for the ESM on-failure destination.
+                    # Lambda service writes the failure envelope to this queue
+                    # on behalf of this function's execution role.
+                    - Effect: Allow
+                      Action: sqs:SendMessage
+                      Resource: !GetAtt ValidationDLQ.Arn
             Events:
                 KinesisStream:
                     Type: Kinesis
@@ -135,7 +141,22 @@ Resources:
                         StartingPosition: LATEST
                         BatchSize: 100
                         MaximumBatchingWindowInSeconds: 5
+                        # BisectBatchOnFunctionError: if the Lambda crashes entirely,
+                        # Kinesis bisects the batch and retries each half — second
+                        # line of defence after ReportBatchItemFailures.
                         BisectBatchOnFunctionError: true
+                        # ReportBatchItemFailures: the Lambda returns
+                        # {"batchItemFailures": [...]} so only failing records
+                        # are retried, not the whole batch.
+                        FunctionResponseTypes:
+                            - ReportBatchItemFailures
+                        # After 2 retries (3 total attempts), exhausted records
+                        # go to the on-failure destination below.
+                        MaximumRetryAttempts: 2
+                        DestinationConfig:
+                            OnFailure:
+                                Type: SQS
+                                Destination: !GetAtt ValidationDLQ.Arn
 
     # CloudWatch log group for the Step Functions state machine.
     #
