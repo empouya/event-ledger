@@ -374,7 +374,72 @@ Resources:
                 - Key: Environment
                   Value: !Ref Environment
 
+    # Dead-letter queue for events that fail Step 1 (schema validation).
+    #
+    # FIFO queue guarantees ordered delivery and exactly-once processing of
+    # failed events. ContentBasedDeduplication is off — we will set an
+    # explicit MessageDeduplicationId = eventId when sending messages in
+    # the state machine Catch blocks (task 3.2). That way SQS drops any
+    # duplicate failure for the same event within the 5-minute dedup window.
+    #
+    # 14-day retention is the SQS maximum, giving ops the largest possible
+    # investigation and replay window.
+    ValidationDLQ:
+        Type: AWS::SQS::Queue
+        Properties:
+            QueueName: !Sub "streamcore-validation-dlq-${Environment}.fifo"
+            FifoQueue: true
+            ContentBasedDeduplication: false
+            MessageRetentionPeriod: 1209600   # 14 days = 14 × 24 × 3600 seconds
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
+    # Dead-letter queue for events that fail Step 4 (persistence: DynamoDB + S3).
+    PersistenceDLQ:
+        Type: AWS::SQS::Queue
+        Properties:
+            QueueName: !Sub "streamcore-persistence-dlq-${Environment}.fifo"
+            FifoQueue: true
+            ContentBasedDeduplication: false
+            MessageRetentionPeriod: 1209600
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
+    # SNS topic that receives CloudWatch alarm state-change notifications (task 3.5).
+    # Must be a standard (non-FIFO) topic — CloudWatch alarms cannot publish to
+    # FIFO SNS topics. Subscriptions (PagerDuty, email) are Phase 5/6.
+    OpsAlertsTopic:
+        Type: AWS::SNS::Topic
+        Properties:
+            TopicName: !Sub "streamcore-ops-alerts-${Environment}"
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
 Outputs:
     ProcessingStateMachineArn:
         Description: ARN of the event processing state machine
         Value: !GetAtt ProcessingStateMachine.Arn
+    ValidationDLQUrl:
+        Description: URL of the validation dead-letter queue
+        Value: !Ref ValidationDLQ
+    ValidationDLQArn:
+        Description: ARN of the validation dead-letter queue
+        Value: !GetAtt ValidationDLQ.Arn
+    PersistenceDLQUrl:
+        Description: URL of the persistence dead-letter queue
+        Value: !Ref PersistenceDLQ
+    PersistenceDLQArn:
+        Description: ARN of the persistence dead-letter queue
+        Value: !GetAtt PersistenceDLQ.Arn
+    OpsAlertsTopicArn:
+        Description: ARN of the ops alerts SNS topic
+        Value: !Ref OpsAlertsTopic
