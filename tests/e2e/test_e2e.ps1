@@ -1,19 +1,21 @@
 # tests/e2e/test_e2e.ps1
 #
-# Repeatable end-to-end test for the Phase 2 pipeline on LocalStack.
+# Repeatable end-to-end test for the Phase 2-3 pipeline on LocalStack.
+#
+# Phase 3 additions:
+#   Section 7  -- S3 key format (y/m/d/h) + x-streamcore-* object metadata
+#   Section 8  -- rejected event routes to ValidationDLQ; DLQ message asserted
+#   Section 10 -- Writer idempotency: direct double-invoke exercises
+#                 attribute_not_exists(PK) conditional write path
+#   Section 11 -- Ingest 503 path: bad stream name -> STREAM_UNAVAILABLE
 #
 # Prerequisites:
 #   1. LocalStack running:      docker compose up -d
 #   2. Stack deployed:          samlocal build && samlocal deploy --config-env local
-#   3. PII salt exists:         run the secret-setup block below if missing
+#   3. PII salt exists:         ./scripts/seed-localstack.ps1
 #   4. Env loaded:              . .\dev-env.ps1
 #
-# Secret setup (run once per docker compose up):
-#   awslocal secretsmanager create-secret `
-#       --name streamcore/pii-salt/tenant_test `
-#       --secret-string '{"piiSalt":"0000000000000000000000000000000000000000000000000000000000000001"}'
-#
-# NOTE — LocalStack Community ESM limitation:
+# NOTE -- LocalStack Community ESM limitation:
 #   The Kinesis->Lambda ESM polls once after deployment, then the shard iterator
 #   expires. This test bypasses it by invoking the Consumer Lambda directly.
 #   We DO read the real Kinesis record via get-records (tests the Ingest->Consumer
@@ -29,24 +31,46 @@ $failures = 0
 function Pass { param($label) Write-Host "[PASS] $label" -ForegroundColor Green }
 function Fail { param($label, $detail) Write-Host "[FAIL] $label -- $detail" -ForegroundColor Red; $script:failures++ }
 
-# ── Resource lookup ───────────────────────────────────────────────────────────
+# Resource lookup
 $consumerFn = (awslocal cloudformation describe-stack-resource `
     --stack-name streamcore-local `
     --logical-resource-id ConsumerFunction `
     --output json | ConvertFrom-Json).StackResourceDetail.PhysicalResourceId
 
-$smArn = (awslocal cloudformation describe-stacks `
+$writerFn = (awslocal cloudformation describe-stack-resource `
     --stack-name streamcore-local `
-    --output json | ConvertFrom-Json).Stacks[0].Outputs |
-    Where-Object { $_.OutputKey -eq "ProcessingStateMachineArn" } |
-    Select-Object -ExpandProperty OutputValue
+    --logical-resource-id WriterFunction `
+    --output json | ConvertFrom-Json).StackResourceDetail.PhysicalResourceId
 
-Write-Host "Consumer: $consumerFn"
-Write-Host "State machine: $smArn"
+$ingestFn = (awslocal cloudformation describe-stack-resource `
+    --stack-name streamcore-local `
+    --logical-resource-id IngestFunction `
+    --output json | ConvertFrom-Json).StackResourceDetail.PhysicalResourceId
 
-# ═══════════════════════════════════════════════════════════════════════════════
+$streamName = (awslocal cloudformation describe-stack-resource `
+    --stack-name streamcore-local `
+    --logical-resource-id EventStream `
+    --output json | ConvertFrom-Json).StackResourceDetail.PhysicalResourceId
+
+$stackOutputs = (awslocal cloudformation describe-stacks `
+    --stack-name streamcore-local `
+    --output json | ConvertFrom-Json).Stacks[0].Outputs
+
+$smArn = ($stackOutputs |
+    Where-Object { $_.OutputKey -eq "ProcessingStateMachineArn" }).OutputValue
+
+$validationDLQUrl = ($stackOutputs |
+    Where-Object { $_.OutputKey -eq "ValidationDLQUrl" }).OutputValue
+
+Write-Host "Consumer:       $consumerFn"
+Write-Host "Writer:         $writerFn"
+Write-Host "Ingest:         $ingestFn"
+Write-Host "State machine:  $smArn"
+Write-Host "ValidationDLQ:  $validationDLQUrl"
+
+# =============================================================================
 # 1. HEALTH CHECK
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 Write-Host "`n=== 1. /health ==="
 $health = Invoke-RestMethod -Method Get -Uri "$env:LOCAL_BASE_URL/health"
 
@@ -56,9 +80,9 @@ else                                   { Fail "status" "expected 'healthy', got 
 if ($health.checks.dynamodb -eq "ok") { Pass "dynamodb check = ok" }
 else                                   { Fail "dynamodb check" "expected 'ok', got '$($health.checks.dynamodb)'" }
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # 2. POST VALID EVENT (dynamic clientTimestamp avoids TIMESTAMP_TOO_OLD rejection)
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 Write-Host "`n=== 2. POST /v1/events (valid) ==="
 $eventObj = Get-Content "events\ingest-order-placed.json" -Raw | ConvertFrom-Json
 $eventObj | Add-Member -NotePropertyName clientTimestamp `
@@ -79,12 +103,9 @@ Write-Host "    ingestionId: $ingestionId"
 Write-Host "    ingestedAt:  $ingestedAt"
 Write-Host "    eventId:     $eventId"
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # 3. READ REAL KINESIS RECORD
-#    The Ingest Lambda writes to Kinesis synchronously — the record is readable
-#    immediately after the POST returns. TRIM_HORIZON gets all records; we filter
-#    by ingestionId so previous test-run records don't interfere.
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 Write-Host "`n=== 3. Read real Kinesis record ==="
 $shardIterator = (awslocal kinesis get-shard-iterator `
     --stream-name streamcore-events-dev `
@@ -104,9 +125,9 @@ $matchingRecord = $allRecords | Where-Object {
 if ($matchingRecord) { Pass "real Kinesis record found for ingestionId $ingestionId" }
 else                  { Fail "Kinesis record" "no record with ingestionId $ingestionId found in stream" }
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # 4. INVOKE CONSUMER LAMBDA WITH THE REAL RECORD
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 Write-Host "`n=== 4. Consumer Lambda ==="
 $kinesisEvent = @{
     Records = @(@{
@@ -146,9 +167,9 @@ else { Fail "Consumer Lambda" "StatusCode=$($invokeResult.StatusCode) FunctionEr
 Write-Host "    waiting for state machine..."
 Start-Sleep -Seconds 10
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # 5. STATE MACHINE: ASSERT SUCCEEDED
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 Write-Host "`n=== 5. State machine execution ==="
 $exec = (awslocal stepfunctions list-executions `
     --state-machine-arn $smArn `
@@ -162,12 +183,9 @@ if ($exec) {
     Fail "execution lookup" "no execution found with name $ingestionId"
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # 6. DYNAMODB ASSERTIONS
-#    - item found  - SK = ingestedAt#eventId (not processedAt — the Phase 1 bug)
-#    - status, pipelineVersion, schemaVersionUsed, expiresAt
-#    - PII: userId must be a 64-char hex digest
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 Write-Host "`n=== 6. DynamoDB assertions ==="
 $exprFile = Join-Path $env:TEMP "sc_expr.json"
 @{ ':pk' = @{ S = 'tenant_test#order.placed' } } | ConvertTo-Json -Compress | Set-Content $exprFile -Encoding ASCII
@@ -184,7 +202,6 @@ if ($null -ne $item) { Pass "item found for ingestionId $ingestionId" }
 else                  { Fail "item lookup" "item not in DynamoDB" }
 
 if ($null -ne $item) {
-    # SK must start with ingestedAt (not processedAt — that changed on every retry)
     if ($item.SK.S.StartsWith($ingestedAt)) { Pass "SK = ingestedAt#eventId (idempotency key correct)" }
     else { Fail "SK format" "expected SK to start with '$ingestedAt', got '$($item.SK.S)'" }
 
@@ -200,7 +217,6 @@ if ($null -ne $item) {
     if ([long]$item.expiresAt.N -gt 0)            { Pass "expiresAt set (TTL)" }
     else                                            { Fail "expiresAt" "expected a non-zero integer" }
 
-    # PII: userId in payload must be a 64-char lowercase hex string, not the raw value
     $payloadParsed = $item.payload.S | ConvertFrom-Json
     $hashedUserId  = $payloadParsed.userId
     if ($hashedUserId.Length -eq 64 -and $hashedUserId -match '^[0-9a-f]+$') {
@@ -216,10 +232,9 @@ if ($null -ne $item) {
     }
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 7. S3 ASSERTION
-#    Key pattern: {tenantId}/{eventType}/{YYYY-MM-DD}/{eventId}.json
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# 7. S3 ASSERTION -- key format y/m/d/h + x-streamcore-* metadata
+# =============================================================================
 Write-Host "`n=== 7. S3 assertion ==="
 $s3Objects = (awslocal s3api list-objects `
     --bucket streamcore-events-raw-dev `
@@ -227,20 +242,44 @@ $s3Objects = (awslocal s3api list-objects `
 
 $s3Match = $s3Objects | Where-Object { $_.Key -like "*$eventId*" } | Select-Object -First 1
 
-if ($s3Match) { Pass "S3 object exists: $($s3Match.Key)" }
-else           { Fail "S3 object" "no object found containing eventId '$eventId'" }
+if ($s3Match) {
+    Pass "S3 object exists: $($s3Match.Key)"
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 8. REJECTED EVENT: bad currency -> SM SUCCEEDED with status=rejected, absent from DynamoDB
-# ═══════════════════════════════════════════════════════════════════════════════
+    if ($s3Match.Key -match "^tenant_test/order\.placed/\d{4}/\d{2}/\d{2}/\d{2}/") {
+        Pass "S3 key has y/m/d/h hierarchy"
+    } else {
+        Fail "S3 key format" "expected tenant/type/yyyy/mm/dd/hh/... hierarchy, got '$($s3Match.Key)'"
+    }
+
+    $s3Head = awslocal s3api head-object `
+        --bucket streamcore-events-raw-dev `
+        --key $s3Match.Key `
+        --output json | ConvertFrom-Json
+    $meta = $s3Head.Metadata
+
+    if ($meta."x-streamcore-tenant-id" -eq "tenant_test") { Pass "S3 metadata: x-streamcore-tenant-id = tenant_test" }
+    else { Fail "S3 metadata" "x-streamcore-tenant-id missing or wrong: '$($meta.'x-streamcore-tenant-id')'" }
+
+    if ($meta."x-streamcore-event-type" -eq "order.placed") { Pass "S3 metadata: x-streamcore-event-type = order.placed" }
+    else { Fail "S3 metadata" "x-streamcore-event-type missing or wrong: '$($meta.'x-streamcore-event-type')'" }
+
+    if ($meta."x-streamcore-schema-version" -eq "1.0") { Pass "S3 metadata: x-streamcore-schema-version = 1.0" }
+    else { Fail "S3 metadata" "x-streamcore-schema-version missing or wrong: '$($meta.'x-streamcore-schema-version')'" }
+} else {
+    Fail "S3 object" "no object found containing eventId '$eventId'"
+}
+
+# =============================================================================
+# 8. REJECTED EVENT: bad currency -> ValidationError -> SendToValidationDLQ
+#    Phase 3: SM ends SUCCEEDED; output is SQS MessageId, not {status:rejected}.
+# =============================================================================
 Write-Host "`n=== 8. Rejected event (invalid currency) ==="
 $badObj = Get-Content "events\ingest-order-placed.json" -Raw | ConvertFrom-Json
 $badObj | Add-Member -NotePropertyName clientTimestamp `
     -NotePropertyValue ((Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")) -Force
-# Use a distinct eventId so this event is unambiguous in S3/DynamoDB checks.
 $badObj | Add-Member -NotePropertyName eventId `
     -NotePropertyValue "660e8400-e29b-41d4-a716-446655440002" -Force
-$badObj.payload.currency = "XYZ"   # not in ACCEPTED_CURRENCIES -> Validator rejects
+$badObj.payload.currency = "XYZ"
 
 $badIngest = Invoke-RestMethod -Method Post `
     -Uri "$env:LOCAL_BASE_URL/v1/events" `
@@ -250,7 +289,6 @@ $badIngest = Invoke-RestMethod -Method Post `
 $badIngestionId = $badIngest.ingestionId
 Write-Host "    bad ingestionId: $badIngestionId"
 
-# Read the real Kinesis record for the bad event.
 Start-Sleep -Seconds 1
 $shardIter2 = (awslocal kinesis get-shard-iterator `
     --stream-name streamcore-events-dev `
@@ -298,17 +336,40 @@ if (-not $badRecord) {
         Where-Object { $_.name -eq $badIngestionId } | Select-Object -First 1
 
     if ($badExec -and $badExec.status -eq "SUCCEEDED") {
+        Pass "rejected event: SM execution SUCCEEDED"
+
         $badOutput = (awslocal stepfunctions describe-execution `
             --execution-arn $badExec.executionArn `
             --output json | ConvertFrom-Json).output | ConvertFrom-Json
-        if ($badOutput.status -eq "rejected") { Pass "invalid event routed to EventRejected state" }
-        else { Fail "rejected routing" "expected status=rejected, got '$($badOutput.status)'" }
+
+        if ($badOutput.MessageId) {
+            Pass "rejected event routed to SendToValidationDLQ (MessageId: $($badOutput.MessageId))"
+        } else {
+            Fail "DLQ routing" "expected SQS MessageId in execution output, got: $($badOutput | ConvertTo-Json -Compress)"
+        }
     } else {
         $badStatus = if ($badExec) { $badExec.status } else { "NOT FOUND" }
         Fail "bad execution" "expected SUCCEEDED, got '$badStatus'"
     }
 
-    # Rejected events never reach the Writer — must be absent from DynamoDB.
+    $dlqResp = awslocal sqs receive-message `
+        --queue-url $validationDLQUrl `
+        --max-number-of-messages 1 `
+        --wait-time-seconds 0 `
+        --output json | ConvertFrom-Json
+    $dlqMsg = if ($dlqResp.PSObject.Properties['Messages']) { $dlqResp.Messages | Select-Object -First 1 } else { $null }
+
+    if ($dlqMsg) {
+        $dlqBody = $dlqMsg.Body | ConvertFrom-Json
+        if ($dlqBody.ingestionId -eq $badIngestionId) {
+            Pass "ValidationDLQ contains rejected event with correct ingestionId"
+        } else {
+            Fail "ValidationDLQ ingestionId" "expected $badIngestionId, got '$($dlqBody.ingestionId)'"
+        }
+    } else {
+        Fail "ValidationDLQ" "no message received from queue"
+    }
+
     $exprFile2 = Join-Path $env:TEMP "sc_expr2.json"
     @{ ':pk' = @{ S = 'tenant_test#order.placed' } } | ConvertTo-Json -Compress | Set-Content $exprFile2 -Encoding ASCII
     $allItems = (awslocal dynamodb query `
@@ -322,16 +383,13 @@ if (-not $badRecord) {
     else { Fail "rejected event isolation" "item found in DynamoDB -- rejected events must not be persisted" }
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 9. IDEMPOTENCY: duplicate delivery yields exactly one DynamoDB item
-#    Re-invoke Consumer with the same real Kinesis record (same ingestionId).
-#    Consumer catches ExecutionAlreadyExists and skips — state machine doesn't
-#    re-run, Writer doesn't re-fire, DynamoDB still has exactly 1 item.
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# 9. IDEMPOTENCY: duplicate Kinesis delivery -> ExecutionAlreadyExists (STANDARD)
+# =============================================================================
 Write-Host "`n=== 9. Idempotency (duplicate Kinesis delivery) ==="
 $dupFile1 = Join-Path $env:TEMP "sc_dup_event.json"
 $dupFile2 = Join-Path $env:TEMP "sc_dup_response.json"
-$kinesisEvent | Set-Content $dupFile1 -Encoding ASCII     # same envelope as section 4
+$kinesisEvent | Set-Content $dupFile1 -Encoding ASCII
 $dupResult = awslocal lambda invoke `
     --function-name $consumerFn `
     --payload "file://$dupFile1" `
@@ -358,9 +416,133 @@ $dedupItems = @($finalItems | Where-Object { $_.ingestionId.S -eq $ingestionId }
 if ($dedupItems.Count -eq 1) { Pass "exactly 1 DynamoDB item after duplicate delivery (idempotent)" }
 else { Fail "idempotency" "expected 1 item, found $($dedupItems.Count)" }
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# 10. WRITER IDEMPOTENCY (direct double-invoke -- attribute_not_exists PK path)
+#
+#     Section 9 tests Consumer-level dedup (ExecutionAlreadyExists), STANDARD only.
+#     On real AWS with EXPRESS executions, duplicates CAN reach the Writer.
+#     Invoke WriterFunction twice with the same event (same PK+SK).
+#     Second call hits ConditionalCheckFailedException; Writer suppresses it silently.
+#     Assert: no Lambda error on either call; exactly 1 DynamoDB item.
+# =============================================================================
+Write-Host "`n=== 10. Writer idempotency (direct double-invoke) ==="
+$idempTs = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+$idempEvent = @{
+    eventId           = "bb0e8400-e29b-41d4-a716-446655440099"
+    eventType         = "user.login"
+    schemaVersion     = "1.0"
+    schemaVersionUsed = "1.0"
+    clientTimestamp   = $idempTs
+    ingestedAt        = $idempTs
+    processedAt       = $idempTs
+    tenantId          = "tenant_test"
+    ingestionId       = "idemp-direct-001"
+    pipelineVersion   = "2.0.0"
+    payload           = @{ source = "web" }
+} | ConvertTo-Json -Compress -Depth 5
+
+$wf  = Join-Path $env:TEMP "sc_writer_idemp.json"
+$wr1 = Join-Path $env:TEMP "sc_writer_resp1.json"
+$wr2 = Join-Path $env:TEMP "sc_writer_resp2.json"
+$idempEvent | Set-Content $wf -Encoding ASCII
+
+awslocal lambda invoke --function-name $writerFn --payload "file://$wf" --output json $wr1 | Out-Null
+$r1 = Get-Content $wr1 | ConvertFrom-Json
+$r1err = if ($r1.PSObject.Properties['FunctionError']) { $r1.FunctionError } else { $null }
+if (-not $r1err) { Pass "Writer first invocation: no error" }
+else              { Fail "Writer first invocation" "FunctionError=$r1err" }
+
+awslocal lambda invoke --function-name $writerFn --payload "file://$wf" --output json $wr2 | Out-Null
+$r2 = Get-Content $wr2 | ConvertFrom-Json
+$r2err = if ($r2.PSObject.Properties['FunctionError']) { $r2.FunctionError } else { $null }
+if (-not $r2err) { Pass "Writer second invocation (duplicate): ConditionalCheckFailed suppressed, no error" }
+else              { Fail "Writer second invocation" "FunctionError=$r2err" }
+
+Remove-Item $wf, $wr1, $wr2 -ErrorAction SilentlyContinue
+
+$exprFile4 = Join-Path $env:TEMP "sc_expr4.json"
+@{ ':pk' = @{ S = 'tenant_test#user.login' } } | ConvertTo-Json -Compress | Set-Content $exprFile4 -Encoding ASCII
+$writerItems = (awslocal dynamodb query `
+    --table-name streamcore-events-dev `
+    --key-condition-expression "PK = :pk" `
+    --expression-attribute-values "file://$exprFile4" `
+    --output json | ConvertFrom-Json).Items
+Remove-Item $exprFile4
+
+$dedupWriterItems = @($writerItems | Where-Object { $_.eventId.S -eq "bb0e8400-e29b-41d4-a716-446655440099" })
+if ($dedupWriterItems.Count -eq 1) { Pass "exactly 1 DynamoDB item after Writer duplicate (attribute_not_exists guard)" }
+else { Fail "Writer idempotency" "expected 1 item, found $($dedupWriterItems.Count)" }
+
+# =============================================================================
+# 11. INGEST 503 PATH (FR-STR-02)
+#     Override EVENT_STREAM_NAME to nonexistent stream -> 503 STREAM_UNAVAILABLE.
+#     Restore correct stream name after test.
+# =============================================================================
+Write-Host "`n=== 11. Ingest 503 path (bad stream name) ==="
+
+$badEnvFile        = Join-Path $env:TEMP "sc_bad_env.json"
+$goodEnvFile       = Join-Path $env:TEMP "sc_good_env.json"
+$ingestPayloadFile = Join-Path $env:TEMP "sc_ingest_503.json"
+$ingest503RespFile = Join-Path $env:TEMP "sc_ingest_503_resp.json"
+
+@{
+    body    = (@{
+        eventType       = "user.login"
+        schemaVersion   = "1.0"
+        clientTimestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+        eventId         = "cc0e8400-e29b-41d4-a716-446655440999"
+        payload         = @{ source = "web" }
+    } | ConvertTo-Json -Compress)
+    headers    = @{ "x-tenant-id" = "tenant_test" }
+    httpMethod = "POST"
+    path       = "/v1/events"
+} | ConvertTo-Json -Compress | Set-Content $ingestPayloadFile -Encoding ASCII
+
+@{ Variables = @{ EVENT_STREAM_NAME = "nonexistent-stream-xyz"; AWS_REGION = "eu-west-1" } } `
+    | ConvertTo-Json -Compress | Set-Content $badEnvFile -Encoding ASCII
+awslocal lambda update-function-configuration `
+    --function-name $ingestFn `
+    --environment "file://$badEnvFile" | Out-Null
+Start-Sleep -Seconds 3
+
+awslocal lambda invoke `
+    --function-name $ingestFn `
+    --payload "file://$ingestPayloadFile" `
+    --output json `
+    $ingest503RespFile | Out-Null
+$resp503 = Get-Content $ingest503RespFile | ConvertFrom-Json
+$body503 = $resp503.body | ConvertFrom-Json
+
+if ($resp503.statusCode -eq 503) { Pass "Ingest 503: statusCode = 503" }
+else { Fail "Ingest 503: statusCode" "expected 503, got $($resp503.statusCode)" }
+
+if ($body503.error -eq "STREAM_UNAVAILABLE") { Pass "Ingest 503: error = STREAM_UNAVAILABLE" }
+else { Fail "Ingest 503: error code" "expected STREAM_UNAVAILABLE, got '$($body503.error)'" }
+
+@{ Variables = @{ EVENT_STREAM_NAME = $streamName; AWS_REGION = "eu-west-1" } } `
+    | ConvertTo-Json -Compress | Set-Content $goodEnvFile -Encoding ASCII
+awslocal lambda update-function-configuration `
+    --function-name $ingestFn `
+    --environment "file://$goodEnvFile" | Out-Null
+Remove-Item $badEnvFile, $goodEnvFile, $ingestPayloadFile, $ingest503RespFile -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 3
+
+$restoreResp = Invoke-RestMethod -Method Post `
+    -Uri "$env:LOCAL_BASE_URL/v1/events" `
+    -Headers @{ "Content-Type" = "application/json"; "X-Tenant-Id" = "tenant_test" } `
+    -Body (@{
+        eventType       = "user.login"
+        schemaVersion   = "1.0"
+        eventId         = "dd0e8400-e29b-41d4-a716-446655440999"
+        clientTimestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+        payload         = @{ source = "web" }
+    } | ConvertTo-Json -Compress)
+if ($restoreResp.status -eq "accepted") { Pass "Ingest restored: 202 accepted after stream name fix" }
+else { Fail "Ingest restored" "expected accepted, got '$($restoreResp.status)'" }
+
+# =============================================================================
 # SUMMARY
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 Write-Host ""
 if ($failures -eq 0) {
     Write-Host "=== ALL TESTS PASSED ===" -ForegroundColor Green
