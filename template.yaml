@@ -435,6 +435,37 @@ Resources:
                 - Key: Environment
                   Value: !Ref Environment
 
+    # Bucket policy that enforces SSE on every PutObject (SEC-ENC-03).
+    #
+    # The condition key s3:x-amz-server-side-encryption is null when the
+    # caller omits the header entirely. "Null": true means "this key is
+    # absent", so the Deny fires on any put without an SSE declaration.
+    #
+    # Why this matters alongside the default-encryption setting above:
+    # the default silently encrypts objects even when the header is missing.
+    # The policy REJECTS those requests instead -- no unencrypted bytes
+    # ever reach S3, even transiently.  Defence in depth.
+    #
+    # Principal: * with Deny -- a Deny always wins over any Allow, so this
+    # applies to every caller regardless of their identity, including the
+    # WriterFunction role.  WriterFunction already sets AES256 so it is
+    # unaffected.
+    EventsBucketPolicy:
+        Type: AWS::S3::BucketPolicy
+        Properties:
+            Bucket: !Ref EventsBucket
+            PolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Sid: DenyUnencryptedPuts
+                      Effect: Deny
+                      Principal: "*"
+                      Action: s3:PutObject
+                      Resource: !Sub "${EventsBucket.Arn}/*"
+                      Condition:
+                          "Null":
+                              "s3:x-amz-server-side-encryption": "true"
+
     # Queryable store for processed events.
     #
     # Key design (ADR-007):
