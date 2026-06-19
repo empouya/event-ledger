@@ -42,6 +42,48 @@ Parameters:
 
 # Resources is where all AWS infrastructure is declared.
 Resources:
+    # ── KMS Customer Managed Key ──────────────────────────────────────────────
+    # One CMK for the whole pipeline. Annual rotation is mandatory (SEC-ENC-02):
+    # KMS automatically creates a new key version each year and keeps old
+    # versions available for decryption — so existing ciphertext never breaks.
+    #
+    # Key policy uses the "account-root enables IAM" pattern:
+    #   • The root principal grants kms:* to the account — this does NOT give
+    #     everyone access; it just allows IAM policies to control access.
+    #   • Actual per-role grants (kms:Decrypt / kms:GenerateDataKey) live in
+    #     each role's IAM policy (see ConsumerFunction below).
+    #   • This avoids a CloudFormation circular dependency: if the key policy
+    #     listed role ARNs, CFN would need the roles to exist before creating
+    #     the key, but the roles reference the key — a deadlock.
+    PipelineKey:
+        Type: AWS::KMS::Key
+        Properties:
+            Description: !Sub "StreamCore pipeline CMK — ${Environment}"
+            EnableKeyRotation: true   # Annual automatic rotation (SEC-ENC-02)
+            KeyPolicy:
+                Version: "2012-10-17"
+                Statement:
+                    - Sid: EnableIAMPolicies
+                      Effect: Allow
+                      Principal:
+                          AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+                      Action: "kms:*"
+                      Resource: "*"
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
+    # Human-readable alias for the CMK.
+    # Using an alias means we can reference alias/streamcore-pipeline-key
+    # in the console and CLI without knowing the key ID.
+    PipelineKeyAlias:
+        Type: AWS::KMS::Alias
+        Properties:
+            AliasName: alias/streamcore-pipeline-key
+            TargetKeyId: !Ref PipelineKey
+
     # The API Gateway that exposes HTTP endpoints to the internet.
     # SAM creates and manages the underlying API Gateway resource automatically.
     StreamCoreApi:
@@ -119,6 +161,13 @@ Resources:
             Description: Decodes Kinesis records and starts one Step Functions execution per event
             Timeout: 60
             MemorySize: 256
+            # KmsKeyArn tells Lambda to encrypt this function's environment
+            # variables at rest using our CMK rather than the default
+            # Lambda-managed key. The execution role must have kms:Decrypt
+            # so Lambda can decrypt the vars on each cold start.
+            # Only ConsumerFunction needs this in Phase 4.1: STATE_MACHINE_ARN
+            # is the only env var that contains an account-ID ARN (SEC-ENC-04).
+            KmsKeyArn: !GetAtt PipelineKey.Arn
             Environment:
                 Variables:
                     STATE_MACHINE_ARN: !Ref ProcessingStateMachine
@@ -133,6 +182,16 @@ Resources:
                     - Effect: Allow
                       Action: sqs:SendMessage
                       Resource: !GetAtt ValidationDLQ.Arn
+                    # kms:Decrypt — Lambda needs this to decrypt the CMK-
+                    # encrypted environment variables (STATE_MACHINE_ARN)
+                    # at cold-start time.
+                    # kms:GenerateDataKey — needed to re-encrypt after a
+                    # key rotation event.
+                    - Effect: Allow
+                      Action:
+                          - kms:Decrypt
+                          - kms:GenerateDataKey
+                      Resource: !GetAtt PipelineKey.Arn
             Events:
                 KinesisStream:
                     Type: Kinesis
@@ -422,6 +481,16 @@ Resources:
             TimeToLiveSpecification:
                 AttributeName: expiresAt
                 Enabled: true
+            # SSESpecification switches DynamoDB from the default AWS-owned
+            # key (aws/dynamodb) to our CMK. DynamoDB calls KMS internally
+            # to generate data keys — the Lambda execution roles do NOT need
+            # kms:* for table reads/writes (DynamoDB handles that itself).
+            # What this buys us: we control the key lifecycle, can revoke
+            # access by disabling the key, and every KMS call is in CloudTrail.
+            SSESpecification:
+                SSEEnabled: true
+                SSEType: KMS
+                KMSMasterKeyId: !GetAtt PipelineKey.Arn
             Tags:
                 - Key: Project
                   Value: StreamCore
