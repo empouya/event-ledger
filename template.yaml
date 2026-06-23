@@ -90,6 +90,17 @@ Resources:
         Type: AWS::Serverless::Api
         Properties:
             StageName: !Ref Environment   # URL will be: .../dev/health
+            Auth:
+                Authorizers:
+                    # JwtAuthorizer is wired only to POST /v1/events (see below).
+                    # GET /health is left open -- no DefaultAuthorizer set.
+                    JwtAuthorizer:
+                        FunctionArn: !GetAtt AuthorizerFunction.Arn
+                        FunctionPayloadType: REQUEST
+                        Identity:
+                            Headers:
+                                - Authorization
+                        AuthorizerResultTtlInSeconds: 0
 
     # The Lambda function that handles GET /health requests.
     HealthFunction:
@@ -115,6 +126,30 @@ Resources:
                         RestApiId: !Ref StreamCoreApi
                         Path: /health
                         Method: GET
+    # Lambda REQUEST authorizer -- validates HS256 Bearer JWTs before any
+    # Lambda on POST /v1/events is invoked.  Local mock for Cognito (ADR-009).
+    #
+    # FunctionPayloadType: REQUEST means API Gateway passes the full request
+    # context (headers, path, method) to this function, not just the token.
+    # This lets the authorizer inspect the Authorization header directly.
+    #
+    # AuthorizerResultTtlInSeconds: 0 -- disable result caching so every
+    # request is validated fresh.  Important for local testing and for
+    # exercising the 401/403 paths without cache interference.
+    AuthorizerFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            CodeUri: functions/authorizer/
+            Handler: handler.lambda_handler
+            Description: Validates HS256 Bearer JWT; returns IAM Allow/Deny policy
+            Timeout: 5
+            MemorySize: 128
+            Policies:
+                - Statement:
+                    - Effect: Allow
+                      Action: secretsmanager:GetSecretValue
+                      Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:streamcore/jwt-secret*"
+
     # Ingest Lambda — hot-path entry point for POST /v1/events.
     # Receives the event body, stamps it with tenantId/ingestionId/ingestedAt,
     # and writes one Kinesis record. Must be lightweight — no heavy logic here.
@@ -144,6 +179,8 @@ Resources:
                         RestApiId: !Ref StreamCoreApi
                         Path: /v1/events
                         Method: POST
+                        Auth:
+                            Authorizer: JwtAuthorizer
 
     # Consumer Lambda — reads from Kinesis in batches and writes to DynamoDB.
     # This is the only writer to EventsTable; the Ingest Lambda never touches DynamoDB.

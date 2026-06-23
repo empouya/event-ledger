@@ -1,21 +1,21 @@
 #!/usr/bin/env pwsh
 # scripts/seed-localstack.ps1
 #
-# Seeds LocalStack Secrets Manager with per-tenant PII salts required by
-# PiiExtractorFunction. Run once after every `docker compose up` before
-# deploying or running tests.
+# Seeds LocalStack Secrets Manager with per-tenant PII salts and the
+# JWT signing secret required by AuthorizerFunction.
+# Run once after every `docker compose up` before deploying or running tests.
 #
+# Prerequisites: . .\dev-env.ps1 (sets JWT_SECRET_LOCAL)
 # Idempotent: secrets that already exist are skipped, not overwritten.
-# This preserves hashes produced in the current LocalStack session.
 
 $ErrorActionPreference = "Stop"
 
+# ---- PII salts (one per tenant) ------------------------------------------
 $tenants = @("tenant_test", "tenant_dev")
 
 foreach ($tenant in $tenants) {
     $secretName = "streamcore/pii-salt/$tenant"
 
-    # Check whether the secret already exists.
     $existing = awslocal secretsmanager list-secrets `
         --filters Key=name,Values=$secretName | ConvertFrom-Json
 
@@ -24,7 +24,6 @@ foreach ($tenant in $tenants) {
         continue
     }
 
-    # Generate a 32-byte hex salt and wrap it in the expected JSON shape.
     $salt = -join ((1..32) | ForEach-Object { "{0:x2}" -f (Get-Random -Max 256) })
     @{ piiSalt = $salt } | ConvertTo-Json -Compress `
         | Set-Content "$env:TEMP\seed-$tenant.json" -Encoding ASCII
@@ -35,6 +34,30 @@ foreach ($tenant in $tenants) {
 
     Remove-Item "$env:TEMP\seed-$tenant.json"
     Write-Host "CREATED $secretName"
+}
+
+# ---- JWT signing secret for the local mock authorizer --------------------
+# jwtSecret must match JWT_SECRET_LOCAL in dev-env.ps1.
+# Value is intentionally well-known for local use only (ADR-009).
+$jwtSecretName = "streamcore/jwt-secret"
+
+$jwtExisting = awslocal secretsmanager list-secrets `
+    --filters Key=name,Values=$jwtSecretName | ConvertFrom-Json
+
+if ($jwtExisting.SecretList.Count -gt 0) {
+    Write-Host "EXISTS  $jwtSecretName"
+} else {
+    $jwtVal = if ($env:JWT_SECRET_LOCAL) { $env:JWT_SECRET_LOCAL } `
+              else { "streamcore-local-dev-jwt-secret-CHANGE-FOR-REAL-AWS" }
+    @{ jwtSecret = $jwtVal } | ConvertTo-Json -Compress `
+        | Set-Content "$env:TEMP\seed-jwt.json" -Encoding ASCII
+
+    awslocal secretsmanager create-secret `
+        --name $jwtSecretName `
+        --secret-string "file://$env:TEMP\seed-jwt.json" | Out-Null
+
+    Remove-Item "$env:TEMP\seed-jwt.json"
+    Write-Host "CREATED $jwtSecretName"
 }
 
 Write-Host "`nSeed complete. Current secrets:"

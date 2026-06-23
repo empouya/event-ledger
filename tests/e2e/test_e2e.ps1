@@ -31,6 +31,39 @@ $failures = 0
 function Pass { param($label) Write-Host "[PASS] $label" -ForegroundColor Green }
 function Fail { param($label, $detail) Write-Host "[FAIL] $label -- $detail" -ForegroundColor Red; $script:failures++ }
 
+
+# New-LocalJWT: mint a test HS256 JWT for local use.
+# The secret must match streamcore/jwt-secret in Secrets Manager (seeded by
+# seed-localstack.ps1).  Uses JWT_SECRET_LOCAL from dev-env.ps1.
+function New-LocalJWT {
+    param(
+        [string]$TenantId   = "tenant_test",
+        [string]$TenantRole = "sdk_writer",
+        [int]$ExpiresInSecs = 3600
+    )
+    function ConvertTo-Base64Url([string]$s) {
+        [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($s)) `
+            -replace '=+$','' -replace '\+','-' -replace '/','_'
+    }
+    $header  = ConvertTo-Base64Url '{"alg":"HS256","typ":"JWT"}'
+    $now     = [int]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+    $payload = ConvertTo-Base64Url (@{
+        iss        = "streamcore-local"
+        sub        = $TenantId
+        tenantId   = $TenantId
+        tenantRole = $TenantRole
+        iat        = $now
+        exp        = $now + $ExpiresInSecs
+    } | ConvertTo-Json -Compress)
+    $sigInput = "$header.$payload"
+    $keyBytes = [Text.Encoding]::UTF8.GetBytes($env:JWT_SECRET_LOCAL)
+    $hmacObj  = [Security.Cryptography.HMACSHA256]::new($keyBytes)
+    $sig      = [Convert]::ToBase64String(
+        $hmacObj.ComputeHash([Text.Encoding]::UTF8.GetBytes($sigInput))
+    ) -replace '=+$','' -replace '\+','-' -replace '/','_'
+    return "$header.$payload.$sig"
+}
+
 # Resource lookup
 $consumerFn = (awslocal cloudformation describe-stack-resource `
     --stack-name streamcore-local `
@@ -66,6 +99,9 @@ Write-Host "Consumer:       $consumerFn"
 Write-Host "Writer:         $writerFn"
 Write-Host "Ingest:         $ingestFn"
 Write-Host "State machine:  $smArn"
+
+$validToken = New-LocalJWT -TenantId "tenant_test"
+Write-Host "validToken minted for tenant_test"
 Write-Host "ValidationDLQ:  $validationDLQUrl"
 
 # =============================================================================
@@ -90,7 +126,7 @@ $eventObj | Add-Member -NotePropertyName clientTimestamp `
 
 $ingest = Invoke-RestMethod -Method Post `
     -Uri "$env:LOCAL_BASE_URL/v1/events" `
-    -Headers @{ "Content-Type" = "application/json"; "X-Tenant-Id" = "tenant_test" } `
+    -Headers @{ "Content-Type" = "application/json"; "Authorization" = "Bearer $validToken" } `
     -Body ($eventObj | ConvertTo-Json -Depth 10 -Compress)
 
 if ($ingest.status -eq "accepted") { Pass "response status = accepted" }
@@ -283,7 +319,7 @@ $badObj.payload.currency = "XYZ"
 
 $badIngest = Invoke-RestMethod -Method Post `
     -Uri "$env:LOCAL_BASE_URL/v1/events" `
-    -Headers @{ "Content-Type" = "application/json"; "X-Tenant-Id" = "tenant_test" } `
+    -Headers @{ "Content-Type" = "application/json"; "Authorization" = "Bearer $validToken" } `
     -Body ($badObj | ConvertTo-Json -Depth 10 -Compress)
 
 $badIngestionId = $badIngest.ingestionId
@@ -493,9 +529,15 @@ $ingest503RespFile = Join-Path $env:TEMP "sc_ingest_503_resp.json"
         eventId         = "cc0e8400-e29b-41d4-a716-446655440999"
         payload         = @{ source = "web" }
     } | ConvertTo-Json -Compress)
-    headers    = @{ "x-tenant-id" = "tenant_test" }
+    headers    = @{ "authorization" = "Bearer $validToken" }
     httpMethod = "POST"
     path       = "/v1/events"
+    requestContext = @{
+        authorizer = @{
+            tenantId   = "tenant_test"
+            tenantRole = "sdk_writer"
+        }
+    }
 } | ConvertTo-Json -Compress | Set-Content $ingestPayloadFile -Encoding ASCII
 
 @{ Variables = @{ EVENT_STREAM_NAME = "nonexistent-stream-xyz"; AWS_REGION = "eu-west-1" } } `
@@ -529,7 +571,7 @@ Start-Sleep -Seconds 3
 
 $restoreResp = Invoke-RestMethod -Method Post `
     -Uri "$env:LOCAL_BASE_URL/v1/events" `
-    -Headers @{ "Content-Type" = "application/json"; "X-Tenant-Id" = "tenant_test" } `
+    -Headers @{ "Content-Type" = "application/json"; "Authorization" = "Bearer $validToken" } `
     -Body (@{
         eventType       = "user.login"
         schemaVersion   = "1.0"

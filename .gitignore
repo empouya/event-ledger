@@ -13,7 +13,7 @@ venv/
 .env
 .env.*
 dev-env.ps1
-hash_generator.ps1
+task-test.ps1
 
 # IDE files — personal editor settings, irrelevant to teammates
 .vscode/

@@ -59,16 +59,24 @@ def lambda_handler(event, context):
         }))
         return _error(400, "MISSING_FIELD", "Field 'eventType' is required.")
 
-    # ── 2. Tenant identification ──────────────────────────────────────────
-    # Phase 4 will extract tenantId from a verified JWT claim.
-    # For now we read it from X-Tenant-Id header, defaulting to tenant_dev.
-    # API Gateway lowercases header names, so we check both casings.
-    headers = event.get("headers") or {}
-    tenant_id = (
-        headers.get("X-Tenant-Id")
-        or headers.get("x-tenant-id")
-        or "tenant_dev"
-    )
+    # ── 2. Tenant identification (FR-ING-03) ─────────────────────────────
+    # tenantId is extracted from the verified JWT claim that the Lambda
+    # authorizer injects into requestContext.authorizer before this
+    # function is invoked.  The X-Tenant-Id header stand-in is retired
+    # (ADR-004 superseded by ADR-009).
+    authorizer_ctx = (event.get("requestContext") or {}).get("authorizer") or {}
+    tenant_id = authorizer_ctx.get("tenantId", "")
+
+    # FR-ING-03: if the request body also carries a tenantId that differs
+    # from the verified claim, log a warning -- the claim always wins.
+    body_tenant = body.get("tenantId", "")
+    if body_tenant and body_tenant != tenant_id:
+        logger.warning(json.dumps({
+            "message": "tenantId in body differs from JWT claim -- using claim",
+            "request_id": request_id,
+            "claim_tenant_id": tenant_id,
+            "body_tenant_id": body_tenant,
+        }))
 
     # ── 3. Inject ingestion metadata ──────────────────────────────────────
     # These fields are appended by the pipeline, not supplied by the SDK.
