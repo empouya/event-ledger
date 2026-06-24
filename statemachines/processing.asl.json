@@ -47,6 +47,14 @@
                     "BackoffRate": 2
                 }
             ],
+            "Catch": [
+                {
+                    "Comment": "Any non-transient failure after retries (e.g. missing salt secret) dead-letters the event rather than losing it.",
+                    "ErrorEquals": ["States.ALL"],
+                    "ResultPath": "$.error",
+                    "Next": "SendToPersistenceDLQ"
+                }
+            ],
             "Next": "EnrichEvent"
         },
         "EnrichEvent": {
@@ -64,6 +72,14 @@
                     "IntervalSeconds": 1,
                     "MaxAttempts": 3,
                     "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "Comment": "Any non-transient failure after retries dead-letters the event rather than losing it.",
+                    "ErrorEquals": ["States.ALL"],
+                    "ResultPath": "$.error",
+                    "Next": "SendToPersistenceDLQ"
                 }
             ],
             "Next": "PersistEvent"

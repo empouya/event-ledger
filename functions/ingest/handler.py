@@ -27,6 +27,16 @@ STREAM_NAME = os.environ["EVENT_STREAM_NAME"]
 _MAX_KINESIS_ATTEMPTS = 3
 _KINESIS_BASE_DELAY_S = 1
 
+# Kinesis ClientError codes worth retrying — all are transient.
+# Any other ClientError code (ResourceNotFoundException, AccessDeniedException,
+# InvalidArgumentException, etc.) is a permanent misconfiguration that retrying
+# cannot fix; fail immediately rather than waiting 3 s on the hot path.
+_KINESIS_TRANSIENT_ERRORS = frozenset({
+    "ProvisionedThroughputExceededException",  # shard throughput limit hit
+    "KMSThrottlingException",                  # KMS rate limit
+    "InternalFailureException",                # transient AWS 5xx
+})
+
 
 def lambda_handler(event, context):
     """
@@ -50,8 +60,9 @@ def lambda_handler(event, context):
         }))
         return _error(400, "INVALID_JSON", "Request body must be valid JSON.")
 
-    # Minimal presence check: we only require eventType in this phase.
-    # Full envelope validation (eventId, schemaVersion, etc.) is Phase 2.
+    # Minimal presence check on the Ingest Lambda.
+    # Full schema validation (eventId, schemaVersion, etc.) is handled
+    # downstream by ValidatorFunction in the Step Functions pipeline.
     if not body.get("eventType"):
         logger.warning(json.dumps({
             "message": "missing required field: eventType",
@@ -86,7 +97,7 @@ def lambda_handler(event, context):
     )
 
     # Merge the system-appended fields into the event body.
-    # tenantId from the header overrides any tenantId in the body (FR-ING-03).
+    # tenantId from the JWT claim overrides any tenantId in the body (FR-ING-03).
     record = {
         **body,
         "tenantId": tenant_id,
@@ -184,7 +195,23 @@ def _put_record_with_retry(
                 Data=data,
             )
             return True
-        except Exception as exc:  # noqa: BLE001
+        except ClientError as exc:
+            code = exc.response["Error"]["Code"]
+            if code not in _KINESIS_TRANSIENT_ERRORS:
+                # Permanent error — retrying cannot help; fail immediately.
+                # ResourceNotFoundException, AccessDeniedException, and
+                # InvalidArgumentException are all misconfigurations that
+                # require a deploy fix, not a back-off.
+                logger.error(json.dumps({
+                    "message": "kinesis put_record permanent error -- not retrying",
+                    "request_id": request_id,
+                    "tenant_id": tenant_id,
+                    "error_code": code,
+                }))
+                _emit_kinesis_write_failure_metric(tenant_id)
+                return False
+            last_exc = exc
+        except Exception as exc:  # noqa: BLE001 — non-ClientError (e.g. network timeout)
             last_exc = exc
 
     # All attempts exhausted.
