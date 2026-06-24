@@ -368,6 +368,13 @@ Resources:
                     - Effect: Allow
                       Action: secretsmanager:GetSecretValue
                       Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:streamcore/pii-salt/*"
+                    # kms:Decrypt is required when Secrets Manager retrieves a secret
+                    # encrypted with the pipeline CMK. Secrets Manager calls KMS to
+                    # decrypt the envelope data key; without this grant the GetSecretValue
+                    # call fails with AccessDeniedException (SEC-ENC-02 / SEC-SECRETS-01).
+                    - Effect: Allow
+                      Action: kms:Decrypt
+                      Resource: !GetAtt PipelineKey.Arn
 
     # Enricher Lambda — Step 3 of the processing workflow.
     # Adds processedAt, pipelineVersion, and schemaVersionUsed to the event.

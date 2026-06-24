@@ -11,6 +11,9 @@
 $ErrorActionPreference = "Stop"
 
 # ---- PII salts (one per tenant) ------------------------------------------
+# Encrypted with the pipeline CMK (SEC-ENC-02 / SEC-SECRETS-01).
+# PiiExtractorFunction needs kms:Decrypt on the CMK to read these.
+# On real AWS, use the CMK ARN or alias; the alias is stable across deploys.
 $tenants = @("tenant_test", "tenant_dev")
 
 foreach ($tenant in $tenants) {
@@ -30,6 +33,7 @@ foreach ($tenant in $tenants) {
 
     awslocal secretsmanager create-secret `
         --name $secretName `
+        --kms-key-id alias/streamcore-pipeline-key `
         --secret-string "file://$env:TEMP\seed-$tenant.json" | Out-Null
 
     Remove-Item "$env:TEMP\seed-$tenant.json"
@@ -39,6 +43,7 @@ foreach ($tenant in $tenants) {
 # ---- JWT signing secret for the local mock authorizer --------------------
 # jwtSecret must match JWT_SECRET_LOCAL in dev-env.ps1.
 # Value is intentionally well-known for local use only (ADR-009).
+# Not encrypted with the CMK -- jwt-secret uses the default key.
 $jwtSecretName = "streamcore/jwt-secret"
 
 $jwtExisting = awslocal secretsmanager list-secrets `
