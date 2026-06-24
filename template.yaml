@@ -254,6 +254,72 @@ Resources:
                                 Type: SQS
                                 Destination: !GetAtt ValidationDLQ.Arn
 
+    # ── Step Functions execution role ────────────────────────────────────────
+    # SEC-AUTH-04: dedicated named role for the state machine.
+    # Named so auditors can find it in the console without decoding a
+    # CloudFormation-generated suffix.
+    #
+    # Permissions (three Sids):
+    #   InvokeLambda       -- the four pipeline Lambdas, nothing else
+    #   CloudWatchLogs     -- nine log-delivery actions; Resource: * is mandated
+    #                         by AWS (none of these support resource constraints)
+    #   DLQWrite           -- sqs:SendMessage on the two DLQ ARNs only
+    #
+    # SEC-AUTH-04 deviation: the spec says "only lambda:InvokeFunction, no data
+    # access". The ASL sends validation and persistence failures directly to SQS
+    # via arn:aws:states:::sqs:sendMessage, so sqs:SendMessage is unavoidable
+    # without redesigning DLQ routing into a Lambda wrapper (higher cost/latency).
+    # Scoped to exactly ValidationDLQ and PersistenceDLQ. Logged in worklog.
+    StreamCoreStepFunctionsRole:
+        Type: AWS::IAM::Role
+        Properties:
+            RoleName: !Sub "StreamCoreStepFunctionsRole-${Environment}"
+            Description: !Sub "Step Functions execution role for StreamCore pipeline — ${Environment}"
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Effect: Allow
+                      Principal:
+                          Service: states.amazonaws.com
+                      Action: sts:AssumeRole
+            Policies:
+                - PolicyName: PipelineStateMachinePolicy
+                  PolicyDocument:
+                      Version: "2012-10-17"
+                      Statement:
+                          - Sid: InvokeLambda
+                            Effect: Allow
+                            Action: lambda:InvokeFunction
+                            Resource:
+                                - !GetAtt ValidatorFunction.Arn
+                                - !GetAtt PiiExtractorFunction.Arn
+                                - !GetAtt EnricherFunction.Arn
+                                - !GetAtt WriterFunction.Arn
+                          - Sid: CloudWatchLogDelivery
+                            Effect: Allow
+                            Action:
+                                - logs:CreateLogDelivery
+                                - logs:GetLogDelivery
+                                - logs:UpdateLogDelivery
+                                - logs:DeleteLogDelivery
+                                - logs:ListLogDeliveries
+                                - logs:PutLogEvents
+                                - logs:PutResourcePolicy
+                                - logs:DescribeResourcePolicies
+                                - logs:DescribeLogGroups
+                            Resource: "*"
+                          - Sid: DLQWrite
+                            Effect: Allow
+                            Action: sqs:SendMessage
+                            Resource:
+                                - !GetAtt ValidationDLQ.Arn
+                                - !GetAtt PersistenceDLQ.Arn
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
     # CloudWatch log group for the Step Functions state machine.
     #
     # EXPRESS executions have no built-in console history — the only way
@@ -367,41 +433,14 @@ Resources:
                 ValidationDLQUrl: !Ref ValidationDLQ
                 PersistenceDLQUrl: !Ref PersistenceDLQ
             Type: STANDARD
+            # Role replaces inline Policies -- SEC-AUTH-04 named dedicated role.
+            Role: !GetAtt StreamCoreStepFunctionsRole.Arn
             Logging:
                 Destinations:
                     - CloudWatchLogsLogGroup:
                         LogGroupArn: !GetAtt ProcessingStateMachineLogs.Arn
                 IncludeExecutionData: true
                 Level: ALL
-            Policies:
-                - Statement:
-                    - Effect: Allow
-                      Action: lambda:InvokeFunction
-                      Resource:
-                          - !GetAtt ValidatorFunction.Arn
-                          - !GetAtt PiiExtractorFunction.Arn
-                          - !GetAtt EnricherFunction.Arn
-                          - !GetAtt WriterFunction.Arn
-                    # CloudWatch log delivery requires these nine actions.
-                    # None of them support resource-level constraints — AWS
-                    # mandates Resource: '*' for CreateLogDelivery and its siblings.
-                    - Effect: Allow
-                      Action:
-                          - logs:CreateLogDelivery
-                          - logs:GetLogDelivery
-                          - logs:UpdateLogDelivery
-                          - logs:DeleteLogDelivery
-                          - logs:ListLogDeliveries
-                          - logs:PutLogEvents
-                          - logs:PutResourcePolicy
-                          - logs:DescribeResourcePolicies
-                          - logs:DescribeLogGroups
-                      Resource: "*"
-                    - Effect: Allow
-                      Action: sqs:SendMessage
-                      Resource:
-                          - !GetAtt ValidationDLQ.Arn
-                          - !GetAtt PersistenceDLQ.Arn
             Tags:
                 Project: StreamCore
                 Environment: !Ref Environment
