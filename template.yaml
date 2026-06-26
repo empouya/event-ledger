@@ -274,7 +274,7 @@ Resources:
         Type: AWS::IAM::Role
         Properties:
             RoleName: !Sub "StreamCoreStepFunctionsRole-${Environment}"
-            Description: !Sub "Step Functions execution role for StreamCore pipeline — ${Environment}"
+            Description: !Sub "Step Functions execution role for StreamCore pipeline - ${Environment}"
             AssumeRolePolicyDocument:
                 Version: "2012-10-17"
                 Statement:
@@ -757,6 +757,49 @@ Resources:
                 - Key: Environment
                   Value: !Ref Environment
 
+    # Summary Lambda — daily reporting engine.
+    # Queries EventsTable GSI-1 (never Scan) for each active tenant and
+    # computes the FR-REP-02 aggregate. Triggered by EventBridge (T5.3);
+    # publishes to SNS (T5.4); sends SES email (T5.5).
+    #
+    # Timeout 300 s: in the worst case this queries many tenants with large
+    # event volumes. 5 minutes gives ample headroom for LocalStack too.
+    #
+    # IAM notes:
+    #   - dynamodb:Query on EventsTable + its GSI (separate ARNs required)
+    #   - dynamodb:Scan on TenantConfigTable: acceptable for a small admin
+    #     table; see worklog for deviation from spec's GetItem-only wording
+    SummaryFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            CodeUri: functions/summary/
+            Handler: handler.lambda_handler
+            Description: Aggregates previous day events per tenant for daily reports
+            Timeout: 300
+            MemorySize: 512
+            Environment:
+                Variables:
+                    EVENTS_TABLE:        !Ref EventsTable
+                    EVENTS_GSI:          GSI1
+                    TENANT_CONFIG_TABLE: !Ref TenantConfigTable
+            Policies:
+                - Statement:
+                    # Query events by tenant + time range via GSI-1.
+                    # DynamoDB requires both the table ARN and the index ARN
+                    # as separate resource entries for Query on a GSI.
+                    - Effect: Allow
+                      Action: dynamodb:Query
+                      Resource:
+                          - !GetAtt EventsTable.Arn
+                          - !Sub "${EventsTable.Arn}/index/*"
+                    # Enumerate active tenants from TenantConfigTable.
+                    # GetItem is included for targeted single-tenant lookups.
+                    - Effect: Allow
+                      Action:
+                          - dynamodb:Scan
+                          - dynamodb:GetItem
+                      Resource: !GetAtt TenantConfigTable.Arn
+
 Outputs:
     ProcessingStateMachineArn:
         Description: ARN of the event processing state machine
@@ -776,3 +819,6 @@ Outputs:
     OpsAlertsTopicArn:
         Description: ARN of the ops alerts SNS topic
         Value: !Ref OpsAlertsTopic
+    SummaryFunctionArn:
+        Description: ARN of the Summary Lambda (EventBridge schedule target)
+        Value: !GetAtt SummaryFunction.Arn
