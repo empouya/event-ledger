@@ -15,6 +15,8 @@ dynamodb         = boto3.resource("dynamodb")
 EVENTS_TABLE     = os.environ["EVENTS_TABLE"]
 EVENTS_GSI       = os.environ.get("EVENTS_GSI", "GSI1")
 TENANT_TABLE     = os.environ["TENANT_CONFIG_TABLE"]
+REPORTS_TOPIC_ARN = os.environ.get("REPORTS_TOPIC_ARN", "")
+sns = boto3.client("sns")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -60,6 +62,9 @@ def lambda_handler(event: dict, context) -> dict:
                 "tenantId": tenant_id,
                 "error": str(exc),
             }))
+
+    for summary in summaries:
+        _publish_tenant_report(summary)
 
     return {
         "reportDate": report_date,
@@ -245,3 +250,41 @@ def _find_zero_rate_periods(items: list) -> list:
                 "durationMinutes": int(gap // 60),
             })
     return periods
+
+
+def _publish_tenant_report(summary: dict) -> None:
+    """
+    Publishes one tenant's summary to the daily-reports SNS topic.
+    The tenantId message attribute lets subscriptions use filter policies
+    so each subscriber only receives their own tenant's messages.
+    Skips silently if REPORTS_TOPIC_ARN is not set (unit-test / local-only mode).
+    """
+    if not REPORTS_TOPIC_ARN:
+        logger.warning(json.dumps({
+            "message": "REPORTS_TOPIC_ARN not set; skipping SNS publish",
+            "tenantId": summary.get("tenantId"),
+        }))
+        return
+    try:
+        sns.publish(
+            TopicArn=REPORTS_TOPIC_ARN,
+            Message=json.dumps(summary),
+            Subject=f"StreamCore Daily Report - {summary.get('displayName', summary.get('tenantId'))} - {summary.get('reportDate')}",
+            MessageAttributes={
+                "tenantId": {
+                    "DataType": "String",
+                    "StringValue": summary.get("tenantId", ""),
+                },
+            },
+        )
+        logger.info(json.dumps({
+            "message": "tenant report published to SNS",
+            "tenantId": summary.get("tenantId"),
+            "reportDate": summary.get("reportDate"),
+        }))
+    except Exception as exc:
+        logger.error(json.dumps({
+            "message": "SNS publish failed",
+            "tenantId": summary.get("tenantId"),
+            "error": str(exc),
+        }))

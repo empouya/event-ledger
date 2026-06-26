@@ -799,6 +799,9 @@ Resources:
                           - dynamodb:Scan
                           - dynamodb:GetItem
                       Resource: !GetAtt TenantConfigTable.Arn
+                    - Effect: Allow
+                      Action: sns:Publish
+                      Resource: !Ref DailyReportsTopic
 
     # ── Summary schedule DLQ ────────────────────────────────────────────────
     SummaryScheduleDLQ:
@@ -851,6 +854,17 @@ Resources:
             Principal: events.amazonaws.com
             SourceArn: !GetAtt SummaryScheduleRule.Arn
 
+    # ── Daily reports SNS topic ─────────────────────────────────────────────
+    DailyReportsTopic:
+        Type: AWS::SNS::Topic
+        Properties:
+            TopicName: !Sub "streamcore-daily-reports-${Environment}"
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
 Outputs:
     ProcessingStateMachineArn:
         Description: ARN of the event processing state machine
@@ -876,3 +890,6 @@ Outputs:
     SummaryScheduleRuleName:
         Description: EventBridge rule that fires the Summary Lambda daily
         Value: !Ref SummaryScheduleRule
+    DailyReportsTopicArn:
+        Description: SNS topic for per-tenant daily report fan-out
+        Value: !Ref DailyReportsTopic
