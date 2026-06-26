@@ -346,9 +346,17 @@ Resources:
         Properties:
             CodeUri: functions/validator/
             Handler: handler.lambda_handler
-            Description: Validates event envelope and type-specific fields
+            Description: Validates event envelope and type-specific fields; enforces tenant event-type allow-list
             Timeout: 10
             MemorySize: 256
+            Environment:
+                Variables:
+                    TENANT_CONFIG_TABLE: !Ref TenantConfigTable
+            Policies:
+                - Statement:
+                    - Effect: Allow
+                      Action: dynamodb:GetItem
+                      Resource: !GetAtt TenantConfigTable.Arn
 
     # PII Extractor Lambda — Step 2 of the processing workflow.
     # Receives the validated event envelope, fetches the per-tenant
@@ -628,6 +636,33 @@ Resources:
             FifoQueue: true
             ContentBasedDeduplication: false
             MessageRetentionPeriod: 1209600   # 14 days = 14 × 24 × 3600 seconds
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
+    # ── TenantConfiguration table ─────────────────────────────────────────────
+    # Stores per-tenant runtime config: display name, report recipients,
+    # permitted event types, PII salt ARN, status.
+    #
+    # Key design: PK = tenantId (string), no sort key.
+    # Every access is GetItem by a known tenant ID — there is no need for a
+    # range key or GSI. Keep it simple: one attribute, one operation.
+    #
+    # No SSE-KMS here — this table holds non-sensitive config, not event data.
+    # On-Demand billing matches EventsTable for consistency.
+    TenantConfigTable:
+        Type: AWS::DynamoDB::Table
+        Properties:
+            TableName: !Sub "streamcore-tenant-config-${Environment}"
+            BillingMode: PAY_PER_REQUEST
+            AttributeDefinitions:
+                - AttributeName: tenantId
+                  AttributeType: S
+            KeySchema:
+                - AttributeName: tenantId
+                  KeyType: HASH
             Tags:
                 - Key: Project
                   Value: StreamCore

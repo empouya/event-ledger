@@ -1,6 +1,7 @@
 import json
 import logging
 import uuid
+import os
 from datetime import datetime, timezone, timedelta
 
 import boto3
@@ -46,6 +47,19 @@ ACCEPTED_FAILURE_CODES = {
 
 # Maximum allowed event size in bytes (envelope + payload combined).
 MAX_EVENT_BYTES = 32 * 1024  # 32 KB
+
+
+# ── DynamoDB (module scope) ──────────────────────────────────────────────────
+# boto3 resource is created once per execution environment (cold start) and
+# reused across warm invocations — avoids per-invocation connection overhead.
+# Region and endpoint are picked up automatically from the Lambda environment;
+# on LocalStack, AWS_ENDPOINT_URL routes calls to localhost:4566.
+#
+# TENANT_CONFIG_TABLE is empty when the env var is absent (e.g., unit tests
+# without the table). _get_active_event_types() checks for this and skips
+# the DynamoDB call, so the Validator still works without the table.
+TENANT_CONFIG_TABLE = os.environ.get("TENANT_CONFIG_TABLE", "")
+_dynamodb = boto3.resource("dynamodb")
 
 
 # ── Custom exception ─────────────────────────────────────────────────────────
@@ -119,6 +133,39 @@ def _parse_utc(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _get_active_event_types(tenant_id: str) -> list:
+    """
+    Returns the activeEventTypes list for the given tenant from TenantConfiguration.
+    An empty list means all registered event types are permitted.
+
+    Fails OPEN on any error — a config-table outage must not stop event processing.
+    The distinction from SEC-SECRETS-02 (fail-closed on secret errors) is intentional:
+    a missing PII salt means we cannot pseudonymise data (a hard security obligation);
+    a missing allow-list is a configuration issue that should not block the pipeline.
+    """
+    if not TENANT_CONFIG_TABLE:
+        logger.warning(json.dumps({
+            "message": "TENANT_CONFIG_TABLE not set; skipping VAL-003",
+        }))
+        return []
+
+    try:
+        table = _dynamodb.Table(TENANT_CONFIG_TABLE)
+        resp = table.get_item(
+            Key={"tenantId": tenant_id},
+            ProjectionExpression="activeEventTypes",
+        )
+        item = resp.get("Item", {})
+        return list(item.get("activeEventTypes", []))
+    except Exception as exc:
+        logger.error(json.dumps({
+            "message": "TenantConfiguration GetItem failed; skipping VAL-003",
+            "tenantId": tenant_id,
+            "error": str(exc),
+        }))
+        return []
+
+
 # ── Handler ──────────────────────────────────────────────────────────────────
 
 def lambda_handler(event: dict, context) -> dict:
@@ -133,9 +180,8 @@ def lambda_handler(event: dict, context) -> dict:
     to the EventRejected terminal state. The raw event never reaches
     DynamoDB or S3.
 
-    Note: tenant-specific event type allow-listing (requires the
-    TenantConfiguration table) is deferred and will be added in a later
-    increment once that table exists.
+    VAL-003 (tenant event-type allow-list) is enforced here via a DynamoDB
+    GetItem on TenantConfiguration if activeEventTypes is non-empty.
     """
     event_id   = event.get("eventId",   "")
     event_type = event.get("eventType", "")
@@ -172,6 +218,21 @@ def lambda_handler(event: dict, context) -> dict:
         _reject(
             "UNKNOWN_EVENT_TYPE",
             f"eventType '{event_type}' is not registered",
+            event_id,
+            event_type,
+        )
+
+    # ── Tenant's permitted event-type allow-list ────────────────────
+    # Only enforced when activeEventTypes is non-empty. An empty list means the
+    # tenant may submit any registered event type (permissive default).
+    # Runs after VAL-002 so we only check known types — no point filtering
+    # an event type that would be rejected as UNKNOWN anyway.
+    tenant_id = event.get("tenantId", "")
+    active_types = _get_active_event_types(tenant_id)
+    if active_types and event_type not in active_types:
+        _reject(
+            "EVENT_TYPE_NOT_PERMITTED",
+            f"eventType '{event_type}' is not in the allow-list for tenant '{tenant_id}'",
             event_id,
             event_type,
         )

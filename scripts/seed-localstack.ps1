@@ -65,6 +65,84 @@ if ($jwtExisting.SecretList.Count -gt 0) {
     Write-Host "CREATED $jwtSecretName"
 }
 
+
+# ---- TenantConfiguration items -------------------------------------------
+# Seed per-tenant config into the TenantConfigTable.
+# Idempotent: uses --condition-expression so a second run silently skips.
+#
+# tenant_test: activeEventTypes is non-empty (["order.placed","user.login"])
+#              so VAL-003 will REJECT any other type for this tenant.
+# tenant_dev:  activeEventTypes is empty -- all registered types are permitted.
+
+$configTable = "streamcore-tenant-config-dev"
+$now = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+
+$tenantSeedConfigs = @(
+    @{
+        tenantId         = "tenant_test"
+        displayName      = "Test Tenant"
+        reportRecipients = @("ops@streamcore.io")
+        activeEventTypes = @("order.placed", "user.login")
+        status           = "active"
+    },
+    @{
+        tenantId         = "tenant_dev"
+        displayName      = "Dev Tenant"
+        reportRecipients = @()
+        activeEventTypes = @()
+        status           = "active"
+    }
+)
+
+foreach ($cfg in $tenantSeedConfigs) {
+    $tid = $cfg.tenantId
+
+    # Look up the ARN of the pii-salt secret we created above.
+    $saltArn = awslocal secretsmanager describe-secret `
+        --secret-id "streamcore/pii-salt/$tid" `
+        --query "ARN" --output text 2>$null
+    if (-not $saltArn) { $saltArn = "" }
+
+    # Build the DynamoDB JSON item.
+    # reportRecipients and activeEventTypes are L (list) typed.
+    $recipL = ($cfg.reportRecipients | ForEach-Object { "{`"S`": `"$_`"}" }) -join ","
+    $typesL  = ($cfg.activeEventTypes  | ForEach-Object { "{`"S`": `"$_`"}" }) -join ","
+
+    $itemJson = @"
+{
+    "tenantId":         {"S": "$tid"},
+    "displayName":      {"S": "$($cfg.displayName)"},
+    "reportRecipients": {"L": [$recipL]},
+    "activeEventTypes": {"L": [$typesL]},
+    "status":           {"S": "$($cfg.status)"},
+    "piiSaltSecretArn": {"S": "$saltArn"},
+    "createdAt":        {"S": "$now"},
+    "updatedAt":        {"S": "$now"}
+}
+"@
+    $tmpFile = "$env:TEMP\seed-tcfg-$tid.json"
+    $itemJson | Set-Content $tmpFile -Encoding ASCII
+
+    try {
+        awslocal dynamodb put-item `
+            --table-name $configTable `
+            --item "file://$tmpFile" `
+            --condition-expression "attribute_not_exists(tenantId)" | Out-Null
+        Write-Host "CREATED TenantConfiguration/$tid"
+    } catch {
+        Write-Host "EXISTS  TenantConfiguration/$tid"
+    }
+
+    Remove-Item $tmpFile
+}
+
+Write-Host ""
+awslocal dynamodb scan `
+    --table-name $configTable `
+    --query "Items[].{tenant:tenantId.S, types:activeEventTypes.L}" `
+    --output table
+
+
 Write-Host "`nSeed complete. Current secrets:"
 awslocal secretsmanager list-secrets `
     --query "SecretList[].Name" --output table
