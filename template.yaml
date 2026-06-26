@@ -800,6 +800,57 @@ Resources:
                           - dynamodb:GetItem
                       Resource: !GetAtt TenantConfigTable.Arn
 
+    # ── Summary schedule DLQ ────────────────────────────────────────────────
+    SummaryScheduleDLQ:
+        Type: AWS::SQS::Queue
+        Properties:
+            QueueName: !Sub "streamcore-summary-schedule-dlq-${Environment}"
+            MessageRetentionPeriod: 1209600
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
+    SummaryScheduleDLQPolicy:
+        Type: AWS::SQS::QueuePolicy
+        Properties:
+            Queues:
+                - !Ref SummaryScheduleDLQ
+            PolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Effect: Allow
+                      Principal:
+                          Service: events.amazonaws.com
+                      Action: sqs:SendMessage
+                      Resource: !GetAtt SummaryScheduleDLQ.Arn
+                      Condition:
+                          ArnEquals:
+                              aws:SourceArn: !GetAtt SummaryScheduleRule.Arn
+
+    # ── EventBridge scheduled rule ──────────────────────────────────────────
+    SummaryScheduleRule:
+        Type: AWS::Events::Rule
+        Properties:
+            Name: !Sub "streamcore-${Environment}-summary-daily"
+            Description: "Triggers SummaryFunction daily at 07:00 UTC"
+            ScheduleExpression: "cron(0 7 * * ? *)"
+            State: ENABLED
+            Targets:
+                - Id: SummaryLambdaTarget
+                  Arn: !GetAtt SummaryFunction.Arn
+                  DeadLetterConfig:
+                      Arn: !GetAtt SummaryScheduleDLQ.Arn
+
+    SummaryLambdaInvokePermission:
+        Type: AWS::Lambda::Permission
+        Properties:
+            FunctionName: !Ref SummaryFunction
+            Action: lambda:InvokeFunction
+            Principal: events.amazonaws.com
+            SourceArn: !GetAtt SummaryScheduleRule.Arn
+
 Outputs:
     ProcessingStateMachineArn:
         Description: ARN of the event processing state machine
@@ -822,3 +873,6 @@ Outputs:
     SummaryFunctionArn:
         Description: ARN of the Summary Lambda (EventBridge schedule target)
         Value: !GetAtt SummaryFunction.Arn
+    SummaryScheduleRuleName:
+        Description: EventBridge rule that fires the Summary Lambda daily
+        Value: !Ref SummaryScheduleRule
