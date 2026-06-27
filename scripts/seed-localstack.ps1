@@ -142,6 +142,11 @@ awslocal dynamodb scan `
     --query "Items[].{tenant:tenantId.S, types:activeEventTypes.L}" `
     --output table
 
+# ── SES sender identity ──────────────────────────────────────────────────────
+Write-Host "`nVerifying SES sender identity..."
+awslocal ses verify-email-identity --email-address reports@streamcore.io
+Write-Host "VERIFIED  reports@streamcore.io"
+
 
 Write-Host "`nSeed complete. Current secrets:"
 awslocal secretsmanager list-secrets `

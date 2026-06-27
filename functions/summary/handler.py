@@ -17,6 +17,9 @@ EVENTS_GSI       = os.environ.get("EVENTS_GSI", "GSI1")
 TENANT_TABLE     = os.environ["TENANT_CONFIG_TABLE"]
 REPORTS_TOPIC_ARN = os.environ.get("REPORTS_TOPIC_ARN", "")
 sns = boto3.client("sns")
+ses           = boto3.client("ses")
+SENDER_EMAIL  = os.environ.get("SENDER_EMAIL", "")
+OPS_EMAIL     = os.environ.get("OPS_EMAIL", "")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -65,6 +68,10 @@ def lambda_handler(event: dict, context) -> dict:
 
     for summary in summaries:
         _publish_tenant_report(summary)
+        _send_tenant_email(summary)
+
+    if summaries:
+        _send_ops_report(summaries, report_date)
 
     return {
         "reportDate": report_date,
@@ -286,5 +293,161 @@ def _publish_tenant_report(summary: dict) -> None:
         logger.error(json.dumps({
             "message": "SNS publish failed",
             "tenantId": summary.get("tenantId"),
+            "error": str(exc),
+        }))
+
+
+def _send_tenant_email(summary: dict) -> None:
+    """
+    Sends the per-tenant daily report to reportRecipients.
+    Skips with WARN if no recipients are configured.
+    Body contains only aggregate statistics — no PII (no userId, no raw emails in body).
+    Subject: StreamCore Daily Report - {displayName} - {YYYY-MM-DD}
+    """
+    recipients = list(summary.get("reportRecipients", []))
+    if not recipients:
+        logger.warning(json.dumps({
+            "message": "no reportRecipients configured; skipping email",
+            "tenantId": summary.get("tenantId"),
+        }))
+        return
+    if not SENDER_EMAIL:
+        logger.warning(json.dumps({"message": "SENDER_EMAIL not set; skipping tenant email"}))
+        return
+
+    tenant_id    = summary.get("tenantId", "")
+    display_name = summary.get("displayName", tenant_id)
+    report_date  = summary.get("reportDate", "")
+    subject      = f"StreamCore Daily Report - {display_name} - {report_date}"
+    latency      = summary.get("latencyMs", {})
+
+    top5_text = "\n".join(
+        f"  {i+1}. {e['eventType']}: {e['count']}"
+        for i, e in enumerate(summary.get("top5EventTypes", []))
+    ) or "  (none)"
+
+    top5_html = "".join(
+        f"<li>{e['eventType']}: {e['count']}</li>"
+        for e in summary.get("top5EventTypes", [])
+    )
+
+    text_body = (
+        f"StreamCore Daily Report\n"
+        f"Tenant: {display_name}\n"
+        f"Date:   {report_date}\n\n"
+        f"Total events:  {summary.get('totalEvents', 0)}\n"
+        f"Processed:     {summary.get('processed', 0)}\n"
+        f"Rejected:      {summary.get('rejected', 'deferred')}\n\n"
+        f"Top event types:\n{top5_text}\n\n"
+        f"Pipeline latency:\n"
+        f"  p50: {latency.get('p50')} ms\n"
+        f"  p99: {latency.get('p99')} ms\n"
+    )
+    html_body = (
+        f"<h2>StreamCore Daily Report</h2>"
+        f"<p><strong>Tenant:</strong> {display_name} &nbsp;|&nbsp; <strong>Date:</strong> {report_date}</p>"
+        f"<table border='1' cellpadding='4' style='border-collapse:collapse'>"
+        f"<tr><th>Metric</th><th>Value</th></tr>"
+        f"<tr><td>Total events</td><td>{summary.get('totalEvents', 0)}</td></tr>"
+        f"<tr><td>Processed</td><td>{summary.get('processed', 0)}</td></tr>"
+        f"<tr><td>Rejected</td><td>{summary.get('rejected', 'deferred')}</td></tr>"
+        f"<tr><td>p50 latency</td><td>{latency.get('p50')} ms</td></tr>"
+        f"<tr><td>p99 latency</td><td>{latency.get('p99')} ms</td></tr>"
+        f"</table>"
+        f"<h3>Top event types</h3><ol>{top5_html}</ol>"
+    )
+
+    try:
+        ses.send_email(
+            Source=SENDER_EMAIL,
+            Destination={"ToAddresses": recipients},
+            Message={
+                "Subject": {"Data": subject, "Charset": "UTF-8"},
+                "Body": {
+                    "Text": {"Data": text_body, "Charset": "UTF-8"},
+                    "Html": {"Data": html_body, "Charset": "UTF-8"},
+                },
+            },
+        )
+        logger.info(json.dumps({
+            "message": "tenant report email sent",
+            "tenantId": tenant_id,
+            "recipientCount": len(recipients),
+        }))
+    except Exception as exc:
+        logger.error(json.dumps({
+            "message": "SES send_email failed",
+            "tenantId": tenant_id,
+            "error": str(exc),
+        }))
+
+
+def _send_ops_report(summaries: list, report_date: str) -> None:
+    """
+    Sends a single internal ops report covering all tenants.
+    Cost Explorer cost line is deferred to Phase 6.
+    """
+    if not SENDER_EMAIL or not OPS_EMAIL:
+        logger.warning(json.dumps({"message": "SENDER_EMAIL or OPS_EMAIL not set; skipping ops report"}))
+        return
+
+    total_events    = sum(s.get("totalEvents", 0) for s in summaries)
+    total_processed = sum(s.get("processed", 0) for s in summaries)
+    subject         = f"StreamCore Internal Ops Report - {report_date}"
+
+    rows_text = "\n".join(
+        f"  {s.get('displayName', s.get('tenantId'))}: "
+        f"{s.get('totalEvents', 0)} events, {s.get('processed', 0)} processed"
+        for s in summaries
+    )
+    rows_html = "".join(
+        f"<tr><td>{s.get('displayName', s.get('tenantId'))}</td>"
+        f"<td>{s.get('totalEvents', 0)}</td>"
+        f"<td>{s.get('processed', 0)}</td></tr>"
+        for s in summaries
+    )
+
+    text_body = (
+        f"StreamCore Internal Ops Report\n"
+        f"Date: {report_date}\n\n"
+        f"All-tenant totals:\n"
+        f"  Events:    {total_events}\n"
+        f"  Processed: {total_processed}\n\n"
+        f"Per-tenant breakdown:\n{rows_text}\n\n"
+        f"Note: Cost Explorer cost line deferred to Phase 6.\n"
+    )
+    html_body = (
+        f"<h2>StreamCore Internal Ops Report</h2>"
+        f"<p><strong>Date:</strong> {report_date}</p>"
+        f"<p>All-tenant totals &mdash; "
+        f"Events: <strong>{total_events}</strong> | "
+        f"Processed: <strong>{total_processed}</strong></p>"
+        f"<table border='1' cellpadding='4' style='border-collapse:collapse'>"
+        f"<tr><th>Tenant</th><th>Events</th><th>Processed</th></tr>"
+        f"{rows_html}"
+        f"</table>"
+        f"<p><em>Cost Explorer cost line deferred to Phase 6.</em></p>"
+    )
+
+    try:
+        ses.send_email(
+            Source=SENDER_EMAIL,
+            Destination={"ToAddresses": [OPS_EMAIL]},
+            Message={
+                "Subject": {"Data": subject, "Charset": "UTF-8"},
+                "Body": {
+                    "Text": {"Data": text_body, "Charset": "UTF-8"},
+                    "Html": {"Data": html_body, "Charset": "UTF-8"},
+                },
+            },
+        )
+        logger.info(json.dumps({
+            "message": "ops report email sent",
+            "reportDate": report_date,
+            "totalEvents": total_events,
+        }))
+    except Exception as exc:
+        logger.error(json.dumps({
+            "message": "SES ops report send_email failed",
             "error": str(exc),
         }))

@@ -782,18 +782,16 @@ Resources:
                     EVENTS_TABLE:        !Ref EventsTable
                     EVENTS_GSI:          GSI1
                     TENANT_CONFIG_TABLE: !Ref TenantConfigTable
+                    REPORTS_TOPIC_ARN:   !Ref DailyReportsTopic
+                    SENDER_EMAIL:        reports@streamcore.io
+                    OPS_EMAIL:           ops@streamcore.io
             Policies:
                 - Statement:
-                    # Query events by tenant + time range via GSI-1.
-                    # DynamoDB requires both the table ARN and the index ARN
-                    # as separate resource entries for Query on a GSI.
                     - Effect: Allow
                       Action: dynamodb:Query
                       Resource:
                           - !GetAtt EventsTable.Arn
                           - !Sub "${EventsTable.Arn}/index/*"
-                    # Enumerate active tenants from TenantConfigTable.
-                    # GetItem is included for targeted single-tenant lookups.
                     - Effect: Allow
                       Action:
                           - dynamodb:Scan
@@ -802,6 +800,11 @@ Resources:
                     - Effect: Allow
                       Action: sns:Publish
                       Resource: !Ref DailyReportsTopic
+                    - Effect: Allow
+                      Action:
+                          - ses:SendEmail
+                          - ses:SendRawEmail
+                      Resource: "*"
 
     # ── Summary schedule DLQ ────────────────────────────────────────────────
     SummaryScheduleDLQ:
