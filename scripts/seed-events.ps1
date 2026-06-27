@@ -1,16 +1,21 @@
-#!/usr/bin/env pwsh
-# scripts/seed-events.ps1
+# scripts/seed-events.ps1 — push the event fixtures through the pipeline.
 #
-# Sends a batch of test events through the processing pipeline.
-# Run after seed-localstack.ps1 so PII salts and TenantConfig exist.
+# Reads every JSON file in events/valid/ (and optionally events/invalid/),
+# stamps it with a fresh tenantId / timestamps / ingestionId, and starts one
+# Step Functions execution per event. This is the manual "give me some data"
+# helper — the e2e suite seeds its own events.
 #
-# Produces:
-#   - 3 valid processed events in DynamoDB (2 x order.placed, 1 x user.login)
-#     for tenant_test — exercises Summary Lambda counting and top-5 logic
-#   - 1 valid event for tenant_dev
-#   - 1 invalid event (bad currency) — exercises the ValidationDLQ path;
-#     will NOT appear in the Summary Lambda output (rejected events are not
-#     written to DynamoDB; rejection count is deferred to Phase 6)
+# Usage:
+#   ./scripts/seed-events.ps1                 # valid events, tenant_dev (all types allowed)
+#   ./scripts/seed-events.ps1 -Tenant tenant_test   # only order.placed / user.login pass VAL-003
+#   ./scripts/seed-events.ps1 -IncludeInvalid       # also send the invalid fixtures (go to ValidationDLQ)
+#
+# Prerequisite: . .\dev-up.ps1  (deploys the stack and seeds configs)
+
+param(
+    [string]$Tenant        = "tenant_dev",
+    [switch]$IncludeInvalid
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -18,155 +23,46 @@ $smArn = awslocal cloudformation describe-stacks `
     --stack-name streamcore-local `
     --query "Stacks[0].Outputs[?OutputKey=='ProcessingStateMachineArn'].OutputValue" `
     --output text
+if (-not $smArn) { Write-Error "ProcessingStateMachineArn not found — is the stack deployed?"; exit 1 }
 
-if (-not $smArn) {
-    Write-Error "Could not find ProcessingStateMachineArn. Is the stack deployed?"
-    exit 1
-}
+$eventsRoot = Join-Path $PSScriptRoot "..\events"
+$dirs = @(Join-Path $eventsRoot "valid")
+if ($IncludeInvalid) { $dirs += (Join-Path $eventsRoot "invalid") }
 
-$ts = [System.DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss") + "Z"
-
-function Send-Event($label, $json) {
-    $tmp = "$env:TEMP\seed-evt-$label.json"
-    $json.Trim() | Set-Content $tmp -Encoding ASCII
-    $exec = awslocal stepfunctions start-execution `
-        --state-machine-arn $smArn `
-        --input "file://$tmp" | ConvertFrom-Json
-    Remove-Item $tmp
-    return $exec.executionArn
-}
-
-Write-Host "`nStarting executions..."
-
-# Valid events
-
+$now = [System.DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fff") + "Z"
 $arns = @()
 
-$arns += Send-Event "1" @"
-{
-  "eventId":        "cafe0001-0001-4000-8000-000000000001",
-  "eventType":      "order.placed",
-  "schemaVersion":  "1.0",
-  "tenantId":       "tenant_test",
-  "sessionId":      "cafe0001-0001-4000-9000-000000000001",
-  "clientTimestamp":"$ts",
-  "sdkVersion":     "2.4.1",
-  "platform":       "web",
-  "ingestedAt":     "$ts",
-  "ingestionId":    "cafe0001-0001-4000-a000-000000000001",
-  "payload": {
-    "orderId": "ORD-SEED-001", "userId": "usr_seed_1",
-    "amount": 99.99, "currency": "EUR",
-    "items": [{"productId":"P1","productName":"Widget","quantity":2,"unitPrice":49.99}],
-    "shippingCountry": "DE"
-  }
+foreach ($dir in $dirs) {
+    foreach ($file in Get-ChildItem $dir -Filter *.json) {
+        $obj = Get-Content $file.FullName -Raw | ConvertFrom-Json
+
+        # Stamp the pipeline-side fields the real Ingest Lambda would add.
+        # clientTimestamp -> now so the Validator's freshness window passes.
+        $ingestionId = [guid]::NewGuid().ToString()
+        $obj | Add-Member tenantId        $Tenant      -Force
+        $obj | Add-Member clientTimestamp $now         -Force
+        $obj | Add-Member ingestedAt      $now         -Force
+        $obj | Add-Member ingestionId     $ingestionId -Force
+
+        $tmp = Join-Path $env:TEMP ("seed-evt-" + $file.BaseName + ".json")
+        ($obj | ConvertTo-Json -Depth 10 -Compress) | Set-Content $tmp -Encoding ASCII
+        $exec = awslocal stepfunctions start-execution `
+            --state-machine-arn $smArn --input "file://$tmp" | ConvertFrom-Json
+        Remove-Item $tmp
+        Write-Host ("started  {0,-22} ({1})" -f $file.Name, $file.Directory.Name)
+        $arns += $exec.executionArn
+    }
 }
-"@
 
-$arns += Send-Event "2" @"
-{
-  "eventId":        "cafe0001-0002-4000-8000-000000000002",
-  "eventType":      "order.placed",
-  "schemaVersion":  "1.0",
-  "tenantId":       "tenant_test",
-  "sessionId":      "cafe0001-0002-4000-9000-000000000002",
-  "clientTimestamp":"$ts",
-  "sdkVersion":     "2.4.1",
-  "platform":       "ios",
-  "ingestedAt":     "$ts",
-  "ingestionId":    "cafe0001-0002-4000-a000-000000000002",
-  "payload": {
-    "orderId": "ORD-SEED-002", "userId": "usr_seed_2",
-    "amount": 149.00, "currency": "GBP",
-    "items": [{"productId":"P2","productName":"Gadget","quantity":1,"unitPrice":149.00}],
-    "shippingCountry": "GB"
-  }
-}
-"@
-
-$arns += Send-Event "3" @"
-{
-  "eventId":        "cafe0001-0003-4000-8000-000000000003",
-  "eventType":      "user.login",
-  "schemaVersion":  "1.0",
-  "tenantId":       "tenant_test",
-  "sessionId":      "cafe0001-0003-4000-9000-000000000003",
-  "clientTimestamp":"$ts",
-  "sdkVersion":     "2.4.1",
-  "platform":       "web",
-  "ingestedAt":     "$ts",
-  "ingestionId":    "cafe0001-0003-4000-a000-000000000003",
-  "payload": {
-    "userId": "usr_seed_3", "loginMethod": "email", "success": true
-  }
-}
-"@
-
-$arns += Send-Event "4" @"
-{
-  "eventId":        "cafe0002-0001-4000-8000-000000000004",
-  "eventType":      "order.placed",
-  "schemaVersion":  "1.0",
-  "tenantId":       "tenant_dev",
-  "sessionId":      "cafe0002-0001-4000-9000-000000000004",
-  "clientTimestamp":"$ts",
-  "sdkVersion":     "2.4.1",
-  "platform":       "server",
-  "ingestedAt":     "$ts",
-  "ingestionId":    "cafe0002-0001-4000-a000-000000000004",
-  "payload": {
-    "orderId": "ORD-DEV-001", "userId": "usr_dev_1",
-    "amount": 50.00, "currency": "USD",
-    "items": [{"productId":"P3","productName":"Thing","quantity":1,"unitPrice":50.00}],
-    "shippingCountry": "US"
-  }
-}
-"@
-
-# Invalid event (bad currency → ValidationDLQ, NOT in DynamoDB)
-
-$arns += Send-Event "5-bad" @"
-{
-  "eventId":        "cafe0001-0099-4000-8000-000000000099",
-  "eventType":      "order.placed",
-  "schemaVersion":  "1.0",
-  "tenantId":       "tenant_test",
-  "sessionId":      "cafe0001-0099-4000-9000-000000000099",
-  "clientTimestamp":"$ts",
-  "sdkVersion":     "2.4.1",
-  "platform":       "web",
-  "ingestedAt":     "$ts",
-  "ingestionId":    "cafe0001-0099-4000-a000-000000000099",
-  "payload": {
-    "orderId": "ORD-BAD-001", "userId": "usr_bad",
-    "amount": 10.00, "currency": "INVALID",
-    "items": [{"productId":"P9","productName":"Bad","quantity":1,"unitPrice":10.00}],
-    "shippingCountry": "DE"
-  }
-}
-"@
-
-Write-Host "Waiting for executions to complete..."
+Write-Host "`nWaiting for executions to settle..."
 Start-Sleep -Seconds 8
 
-# Report results
-
-$passed = 0; $failed = 0
+$ok = 0; $other = 0
 foreach ($arn in $arns) {
-    $status = awslocal stepfunctions describe-execution `
-        --execution-arn $arn --query "status" --output text
-    $label = if ($arn -match "seed-evt-(\S+)") { $Matches[1] } else { $arn.Split(":")[-1] }
-    Write-Host "  $arn => $status"
-    if ($status -eq "SUCCEEDED") { $passed++ } else { $failed++ }
+    $st = awslocal stepfunctions describe-execution --execution-arn $arn --query "status" --output text
+    if ($st -eq "SUCCEEDED") { $ok++ } else { $other++ }
 }
-
-Write-Host "`nExecutions: $passed SUCCEEDED, $failed other"
-Write-Host "(All 5 executions return SUCCEEDED - the bad-currency event is caught"
-Write-Host " by the Catch block and routed to ValidationDLQ, not a pipeline failure)"
-
-# Confirm DynamoDB has the processed events
-
-Write-Host "`nEvents in DynamoDB:"
-awslocal dynamodb scan `
-    --table-name streamcore-events-dev `
-    --query "Count"
+Write-Host "Executions: $ok SUCCEEDED, $other other"
+Write-Host "(Invalid fixtures also report SUCCEEDED — they are caught and routed to the ValidationDLQ, not failed.)"
+Write-Host "`nEvents now in DynamoDB:"
+awslocal dynamodb scan --table-name streamcore-events-dev --query "Count"

@@ -12,7 +12,8 @@ venv/
 # Secrets and environment config — never commit credentials
 .env
 .env.*
-dev-env.ps1
+# dev-up.ps1 IS committed (the shared bring-up script). Keep personal overrides here:
+dev-env.local.ps1
 task-test.ps1
 
 # IDE files — personal editor settings, irrelevant to teammates

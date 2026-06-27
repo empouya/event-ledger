@@ -1,0 +1,17 @@
+{
+  "eventId": "3d4e5f6a-7b8c-4d9e-8f0a-1b2c3d4e5f6a",
+  "eventType": "product.viewed",
+  "schemaVersion": "1.0",
+  "sessionId": "44445555-6666-4777-8888-999900001111",
+  "clientTimestamp": "2026-06-27T10:03:00.000Z",
+  "sdkVersion": "2.4.1",
+  "platform": "android",
+  "payload": {
+    "productId": "PROD-002",
+    "productName": "Gadget Mini",
+    "category": "accessories",
+    "userId": "usr_ddd444",
+    "referrerSource": "search",
+    "priceDisplayed": 29.99
+  }
+}

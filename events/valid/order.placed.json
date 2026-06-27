@@ -1,0 +1,20 @@
+{
+  "eventId": "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+  "eventType": "order.placed",
+  "schemaVersion": "1.0",
+  "sessionId": "11112222-3333-4444-8555-666677778888",
+  "clientTimestamp": "2026-06-27T10:00:00.000Z",
+  "sdkVersion": "2.4.1",
+  "platform": "web",
+  "payload": {
+    "orderId": "ORD-0001",
+    "userId": "usr_aaa111",
+    "userEmail": "buyer@example.com",
+    "amount": 149.99,
+    "currency": "EUR",
+    "items": [
+      { "productId": "PROD-001", "productName": "Widget Pro", "quantity": 2, "unitPrice": 74.99 }
+    ],
+    "shippingCountry": "DE"
+  }
+}

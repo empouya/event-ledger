@@ -1,0 +1,15 @@
+{
+  "eventId": "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e",
+  "eventType": "user.login",
+  "schemaVersion": "1.0",
+  "sessionId": "22223333-4444-4555-8666-777788889999",
+  "clientTimestamp": "2026-06-27T10:01:00.000Z",
+  "sdkVersion": "2.4.1",
+  "platform": "ios",
+  "payload": {
+    "userId": "usr_bbb222",
+    "loginMethod": "email",
+    "success": true,
+    "ipCountry": "DE"
+  }
+}

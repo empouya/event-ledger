@@ -1,0 +1,20 @@
+{
+  "_note": "Invalid fixture: currency 'XYZ' is not in the ISO-4217 allow-list. Validator rejects with INVALID_CURRENCY and the event is routed to the ValidationDLQ.",
+  "eventId": "5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c",
+  "eventType": "order.placed",
+  "schemaVersion": "1.0",
+  "sessionId": "66667777-8888-4999-8000-111122223333",
+  "clientTimestamp": "2026-06-27T10:05:00.000Z",
+  "sdkVersion": "2.4.1",
+  "platform": "web",
+  "payload": {
+    "orderId": "ORD-BAD-001",
+    "userId": "usr_eee555",
+    "amount": 10.00,
+    "currency": "XYZ",
+    "items": [
+      { "productId": "PROD-003", "productName": "Thing", "quantity": 1, "unitPrice": 10.00 }
+    ],
+    "shippingCountry": "DE"
+  }
+}

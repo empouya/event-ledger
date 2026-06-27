@@ -1,0 +1,19 @@
+{
+  "eventId": "4e5f6a7b-8c9d-4e0f-8a1b-2c3d4e5f6a7b",
+  "eventType": "payment.failed",
+  "schemaVersion": "1.0",
+  "sessionId": "55556666-7777-4888-8999-000011112222",
+  "clientTimestamp": "2026-06-27T10:04:00.000Z",
+  "sdkVersion": "2.4.1",
+  "platform": "web",
+  "payload": {
+    "paymentId": "PAY-0001",
+    "orderId": "ORD-0001",
+    "userId": "usr_aaa111",
+    "amount": 149.99,
+    "currency": "EUR",
+    "failureCode": "card_declined",
+    "paymentMethod": "card",
+    "attemptNumber": 1
+  }
+}

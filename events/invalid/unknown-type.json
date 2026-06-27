@@ -1,0 +1,14 @@
+{
+  "_note": "Invalid fixture: eventType 'inventory.synced' is not a registered type. Validator rejects with UNKNOWN_EVENT_TYPE.",
+  "eventId": "6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d",
+  "eventType": "inventory.synced",
+  "schemaVersion": "1.0",
+  "sessionId": "77778888-9999-4000-8111-222233334444",
+  "clientTimestamp": "2026-06-27T10:06:00.000Z",
+  "sdkVersion": "2.4.1",
+  "platform": "server",
+  "payload": {
+    "sku": "SKU-123",
+    "quantity": 42
+  }
+}
