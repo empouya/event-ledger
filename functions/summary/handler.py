@@ -7,6 +7,9 @@ from datetime import datetime, date, timedelta, timezone
 import boto3
 from boto3.dynamodb.conditions import Key
 
+from aws_xray_sdk.core import xray_recorder, patch_all
+patch_all()
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 

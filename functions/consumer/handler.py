@@ -4,6 +4,8 @@ import logging
 import os
 
 import boto3
+from aws_xray_sdk.core import xray_recorder, patch_all
+patch_all()
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -38,6 +40,11 @@ def lambda_handler(event, context):
     """
     records = event.get("Records", [])
     batch_item_failures = []
+
+    try:
+        xray_recorder.put_annotation("batchSize", len(records))
+    except Exception:
+        pass
 
     logger.info(json.dumps({
         "message": "consumer batch received",

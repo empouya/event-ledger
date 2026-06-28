@@ -11,6 +11,7 @@ Globals:
         Runtime: python3.12
         Architectures:
         - x86_64
+        Tracing: Active
         Tags:
             Project: StreamCore
             Environment: !Ref Environment
@@ -90,6 +91,7 @@ Resources:
         Type: AWS::Serverless::Api
         Properties:
             StageName: !Ref Environment   # URL will be: .../dev/health
+            TracingEnabled: true
             Auth:
                 Authorizers:
                     # JwtAuthorizer is wired only to POST /v1/events (see below).
@@ -314,6 +316,14 @@ Resources:
                             Resource:
                                 - !GetAtt ValidationDLQ.Arn
                                 - !GetAtt PersistenceDLQ.Arn
+                          - Sid: XRayTracing
+                            Effect: Allow
+                            Action:
+                                - xray:PutTraceSegments
+                                - xray:PutTelemetryRecords
+                                - xray:GetSamplingRules
+                                - xray:GetSamplingTargets
+                            Resource: "*"
             Tags:
                 - Key: Project
                   Value: StreamCore
@@ -450,6 +460,8 @@ Resources:
             Type: STANDARD
             # Role replaces inline Policies -- SEC-AUTH-04 named dedicated role.
             Role: !GetAtt StreamCoreStepFunctionsRole.Arn
+            Tracing:
+                Enabled: true
             Logging:
                 Destinations:
                     - CloudWatchLogsLogGroup:

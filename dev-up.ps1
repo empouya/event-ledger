@@ -1,4 +1,4 @@
-# dev-up.ps1 — bring the local StreamCore dev environment up in one command.
+﻿# dev-up.ps1 -- bring the local StreamCore dev environment up in one command.
 #
 # DOT-SOURCE it so the env vars persist in your session:
 #     . .\dev-up.ps1
@@ -9,14 +9,14 @@
 #   3. Validate -> build -> deploy the stack to LocalStack (create or update).
 #   4. Set the session env vars the tests use.
 #   5. Seed LocalStack configs (PII salts, JWT secret, TenantConfiguration, SES identity).
-#      Events are NOT seeded here — use scripts/seed-events.ps1 for that.
+#      Events are NOT seeded here -- use scripts/seed-events.ps1 for that.
 
 $ErrorActionPreference = "Stop"
 
 # Run from the project root so template.yaml resolves regardless of caller location.
 Set-Location $PSScriptRoot
 
-# ── 1. Python 3.12 on PATH ────────────────────────────────────────────────────
+# - 1. Python 3.12 on PATH -
 # Detect via the Windows 'py' launcher so no machine-specific path is hardcoded.
 $py312 = & py -3.12 -c "import sys, os; print(os.path.dirname(sys.executable))" 2>$null
 if ($py312) {
@@ -26,38 +26,39 @@ if ($py312) {
     Write-Warning "[1/5] Python 3.12 not found via 'py -3.12'. Install it or add it to PATH manually."
 }
 
-# ── 2. AWS login (only needed for real-AWS work) ──────────────────────────────
+# - 2. AWS login (only needed for real-AWS work) -
 $env:AWS_PROFILE = "streamcore-dev"
-$ident = aws sts get-caller-identity --profile streamcore-dev 2>$null
+$ident = $null
+try { $ident = aws sts get-caller-identity --profile streamcore-dev 2>$null } catch {}
 if (-not $ident) {
     Write-Host "[2/5] Not logged in to AWS. Running 'aws sso login' (skip with Ctrl-C if local-only)..."
-    try { aws sso login --profile streamcore-dev } catch { Write-Warning "SSO login skipped/failed — fine for LocalStack-only work." }
+    try { aws sso login --profile streamcore-dev } catch { Write-Warning "SSO login skipped/failed -- fine for LocalStack-only work." }
 } else {
     Write-Host "[2/5] AWS identity OK (profile streamcore-dev)."
 }
 
-# ── 3. Validate, build, deploy to LocalStack ──────────────────────────────────
+# - 3. Validate, build, deploy to LocalStack -
 Write-Host "[3/5] Validating, building, and deploying to LocalStack..."
 cfn-lint template.yaml
 sam validate --lint
 samlocal build
 samlocal deploy --config-env local
 
-# ── 4. Session env vars ───────────────────────────────────────────────────────
+# - 4. Session env vars -
 # JWT secret for the local mock authorizer (must match streamcore/jwt-secret,
-# seeded below). Well-known, LOCAL-ONLY value (ADR-009) — never use on real AWS.
+# seeded below). Well-known, LOCAL-ONLY value (ADR-009) -- never use on real AWS.
 $env:JWT_SECRET_LOCAL = "streamcore-local-dev-jwt-secret-CHANGE-FOR-REAL-AWS"
 
-# The REST API id changes on every LocalStack restart — resolve it fresh.
+# The REST API id changes on every LocalStack restart -- resolve it fresh.
 $apiId = (awslocal apigateway get-rest-apis --query "items[0].id" --output text 2>$null)
 if ($apiId -and $apiId -ne "None") {
     $env:LOCAL_BASE_URL = "http://localhost:4566/restapis/$apiId/dev/_user_request_"
     Write-Host "[4/5] LOCAL_BASE_URL = $env:LOCAL_BASE_URL"
 } else {
-    Write-Warning "[4/5] Could not resolve the LocalStack API Gateway id — is the deploy healthy?"
+    Write-Warning "[4/5] Could not resolve the LocalStack API Gateway id -- is the deploy healthy?"
 }
 
-# ── 5. Seed configs (NOT events) ──────────────────────────────────────────────
+# - 5. Seed configs (NOT events) -
 Write-Host "[5/5] Seeding configs (PII salts, JWT secret, TenantConfiguration, SES identity)..."
 
 # 5a. Per-tenant PII salts (CMK-encrypted). Idempotent: skip if present.
@@ -103,18 +104,17 @@ foreach ($cfg in $tenantConfigs) {
     $recipL = ($cfg.reportRecipients | ForEach-Object { "{`"S`": `"$_`"}" }) -join ","
     $typesL = ($cfg.activeEventTypes  | ForEach-Object { "{`"S`": `"$_`"}" }) -join ","
     $tmp = "$env:TEMP\seed-tcfg-$tid.json"
-    @"
-{
-  "tenantId":         {"S": "$tid"},
-  "displayName":      {"S": "$($cfg.displayName)"},
-  "reportRecipients": {"L": [$recipL]},
-  "activeEventTypes": {"L": [$typesL]},
-  "status":           {"S": "$($cfg.status)"},
-  "piiSaltSecretArn": {"S": "$saltArn"},
-  "createdAt":        {"S": "$now"},
-  "updatedAt":        {"S": "$now"}
-}
-"@ | Set-Content $tmp -Encoding ASCII
+
+    $json  = "{`"tenantId`":{`"S`":`"$tid`"},"
+    $json += "`"displayName`":{`"S`":`"$($cfg.displayName)`"},"
+    $json += "`"reportRecipients`":{`"L`":[$recipL]},"
+    $json += "`"activeEventTypes`":{`"L`":[$typesL]},"
+    $json += "`"status`":{`"S`":`"$($cfg.status)`"},"
+    $json += "`"piiSaltSecretArn`":{`"S`":`"$saltArn`"},"
+    $json += "`"createdAt`":{`"S`":`"$now`"},"
+    $json += "`"updatedAt`":{`"S`":`"$now`"}}"
+    $json | Set-Content $tmp -Encoding ASCII
+
     try {
         awslocal dynamodb put-item --table-name $configTable --item "file://$tmp" `
             --condition-expression "attribute_not_exists(tenantId)" | Out-Null

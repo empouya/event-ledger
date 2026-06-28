@@ -30,6 +30,9 @@ import time
 import boto3
 from botocore.exceptions import ClientError
 
+from aws_xray_sdk.core import xray_recorder, patch_all
+patch_all()
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 

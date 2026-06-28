@@ -6,6 +6,9 @@ from datetime import datetime, timezone, timedelta
 
 import boto3
 
+from aws_xray_sdk.core import xray_recorder, patch_all
+patch_all()
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 

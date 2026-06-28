@@ -8,6 +8,9 @@ from datetime import datetime, timezone
 import boto3
 from botocore.exceptions import ClientError
 
+from aws_xray_sdk.core import xray_recorder, patch_all
+patch_all()
+
 # Structured JSON logging — every entry is a parseable JSON object so
 # CloudWatch can index individual fields (level, request_id, tenant_id, etc.).
 logger = logging.getLogger()
@@ -77,6 +80,15 @@ def lambda_handler(event, context):
     # (ADR-004 superseded by ADR-009).
     authorizer_ctx = (event.get("requestContext") or {}).get("authorizer") or {}
     tenant_id = authorizer_ctx.get("tenantId", "")
+
+    # X-Ray annotation — tenantId and eventType are indexed and filterable
+    # in the X-Ray console. Wrapped in try/except: LocalStack may not have
+    # an active segment, which causes SegmentNotFoundException.
+    try:
+        xray_recorder.put_annotation("tenantId", tenant_id)
+        xray_recorder.put_annotation("eventType", body.get("eventType", ""))
+    except Exception:
+        pass
 
     # FR-ING-03: if the request body also carries a tenantId that differs
     # from the verified claim, log a warning -- the claim always wins.

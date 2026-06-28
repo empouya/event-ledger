@@ -3,6 +3,9 @@ import logging
 import os
 from datetime import datetime, timezone
 
+from aws_xray_sdk.core import xray_recorder, patch_all
+patch_all()
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -25,6 +28,11 @@ def lambda_handler(event: dict, context) -> dict:
         "request_id": context.aws_request_id,
         "event_id": event_id,
     }))
+
+    try:
+        xray_recorder.put_annotation("pipelineVersion", PIPELINE_VERSION)
+    except Exception:
+        pass
 
     # Capture the processing timestamp once so all three fields are consistent.
     processed_at = (

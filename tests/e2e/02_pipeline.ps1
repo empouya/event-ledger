@@ -97,7 +97,7 @@ if ($invokeResult.StatusCode -eq 200 -and -not $funcError) { Pass "Consumer Lamb
 else { Fail "Consumer Lambda" "StatusCode=$($invokeResult.StatusCode) FunctionError=$funcError" }
 
 Write-Host "    waiting for state machine..."
-Start-Sleep -Seconds 10
+Start-Sleep -Seconds 20
 
 # =============================================================================
 # 5. STATE MACHINE: ASSERT SUCCEEDED
