@@ -770,6 +770,179 @@ Resources:
                 - Key: Environment
                   Value: !Ref Environment
 
+    LambdaErrorRateAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmName: !Sub "streamcore-lambda-error-rate-${Environment}"
+            AlarmDescription: >
+                Lambda error rate exceeded 1% over 5 minutes.
+                Investigate the function logs for unhandled exceptions.
+            ComparisonOperator: GreaterThanThreshold
+            Threshold: 1
+            EvaluationPeriods: 1
+            TreatMissingData: notBreaching
+            Metrics:
+                - Id: e1
+                  MetricStat:
+                      Metric:
+                          Namespace: AWS/Lambda
+                          MetricName: Errors
+                      Period: 300
+                      Stat: Sum
+                  ReturnData: false
+                - Id: i1
+                  MetricStat:
+                      Metric:
+                          Namespace: AWS/Lambda
+                          MetricName: Invocations
+                      Period: 300
+                      Stat: Sum
+                  ReturnData: false
+                - Id: rate
+                  Expression: "IF(i1 > 0, (e1 / i1) * 100, 0)"
+                  ReturnData: true
+            AlarmActions:
+                - !Ref OpsAlertsTopic
+            OKActions:
+                - !Ref OpsAlertsTopic
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
+    LambdaThrottlesAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmName: !Sub "streamcore-lambda-throttles-${Environment}"
+            AlarmDescription: >
+                Lambda throttles detected for 3 consecutive minutes.
+                Scale up reserved concurrency or reduce invocation rate.
+            Namespace: AWS/Lambda
+            MetricName: Throttles
+            Statistic: Sum
+            Period: 60
+            EvaluationPeriods: 3
+            Threshold: 0
+            ComparisonOperator: GreaterThanThreshold
+            AlarmActions:
+                - !Ref OpsAlertsTopic
+            OKActions:
+                - !Ref OpsAlertsTopic
+            TreatMissingData: notBreaching
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
+    KinesisIteratorAgeAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmName: !Sub "streamcore-kinesis-iterator-age-${Environment}"
+            AlarmDescription: >
+                Kinesis iterator age exceeded 60 seconds — Consumer Lambda is
+                falling behind the stream. Investigate Consumer errors or add shards.
+            Namespace: AWS/Kinesis
+            MetricName: GetRecords.IteratorAgeMilliseconds
+            Dimensions:
+                - Name: StreamName
+                  Value: !Ref EventStream
+            Statistic: Maximum
+            Period: 60
+            EvaluationPeriods: 1
+            Threshold: 60000
+            ComparisonOperator: GreaterThanThreshold
+            AlarmActions:
+                - !Ref OpsAlertsTopic
+            OKActions:
+                - !Ref OpsAlertsTopic
+            TreatMissingData: notBreaching
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
+    StepFunctionFailuresAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmName: !Sub "streamcore-stepfunctions-failures-${Environment}"
+            AlarmDescription: >
+                More than 5 Step Functions executions failed in the last 5 minutes.
+                Investigate Validator, PII extractor, Enricher, or Writer Lambda logs.
+            Namespace: AWS/States
+            MetricName: ExecutionsFailed
+            Dimensions:
+                - Name: StateMachineArn
+                  Value: !Ref ProcessingStateMachine
+            Statistic: Sum
+            Period: 300
+            EvaluationPeriods: 1
+            Threshold: 5
+            ComparisonOperator: GreaterThanThreshold
+            AlarmActions:
+                - !Ref OpsAlertsTopic
+            OKActions:
+                - !Ref OpsAlertsTopic
+            TreatMissingData: notBreaching
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
+    APIGateway5xxRateAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmName: !Sub "streamcore-apigw-5xx-rate-${Environment}"
+            AlarmDescription: >
+                API Gateway 5XX error rate exceeded 0.5% over 5 minutes.
+                Investigate IngestFunction or AuthorizerFunction errors.
+            ComparisonOperator: GreaterThanThreshold
+            Threshold: 0.5
+            EvaluationPeriods: 1
+            TreatMissingData: notBreaching
+            Metrics:
+                - Id: err5xx
+                  MetricStat:
+                      Metric:
+                          Namespace: AWS/ApiGateway
+                          MetricName: 5XXError
+                          Dimensions:
+                              - Name: ApiName
+                                Value: !Sub "streamcore-api-${Environment}"
+                              - Name: Stage
+                                Value: !Ref Environment
+                      Period: 300
+                      Stat: Sum
+                  ReturnData: false
+                - Id: total
+                  MetricStat:
+                      Metric:
+                          Namespace: AWS/ApiGateway
+                          MetricName: Count
+                          Dimensions:
+                              - Name: ApiName
+                                Value: !Sub "streamcore-api-${Environment}"
+                              - Name: Stage
+                                Value: !Ref Environment
+                      Period: 300
+                      Stat: Sum
+                  ReturnData: false
+                - Id: rate5xx
+                  Expression: "IF(total > 0, (err5xx / total) * 100, 0)"
+                  ReturnData: true
+            AlarmActions:
+                - !Ref OpsAlertsTopic
+            OKActions:
+                - !Ref OpsAlertsTopic
+            Tags:
+                - Key: Project
+                  Value: StreamCore
+                - Key: Environment
+                  Value: !Ref Environment
+
     # Summary Lambda — daily reporting engine.
     # Queries EventsTable GSI-1 (never Scan) for each active tenant and
     # computes the FR-REP-02 aggregate. Triggered by EventBridge (T5.3);
