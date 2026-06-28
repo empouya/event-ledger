@@ -943,6 +943,65 @@ Resources:
                 - Key: Environment
                   Value: !Ref Environment
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Saved CloudWatch Logs Insights queries (DVA 4.1.3)
+    # ─────────────────────────────────────────────────────────────────────
+
+    InsightQueryFailedByTenant:
+        Type: AWS::Logs::QueryDefinition
+        Properties:
+            Name: !Sub "streamcore/failed-events-by-tenant-${Environment}"
+            QueryString: |
+                fields @timestamp, tenantId, failureCode, detail
+                | filter level = "WARN"
+                | sort @timestamp desc
+                | limit 50
+            LogGroupNames:
+                - !Sub "/aws/lambda/${ValidatorFunction}"
+                - !Sub "/aws/lambda/${IngestFunction}"
+
+    InsightQueryHighLatency:
+        Type: AWS::Logs::QueryDefinition
+        Properties:
+            Name: !Sub "streamcore/high-latency-events-${Environment}"
+            QueryString: |
+                fields @timestamp, tenantId, eventType, durationMs
+                | filter durationMs > 500
+                | sort durationMs desc
+                | limit 50
+            LogGroupNames:
+                - !Sub "/aws/lambda/${EnricherFunction}"
+                - !Sub "/aws/lambda/${WriterFunction}"
+                - !Sub "/aws/lambda/${ValidatorFunction}"
+
+    InsightQueryDLQByFailureCode:
+        Type: AWS::Logs::QueryDefinition
+        Properties:
+            Name: !Sub "streamcore/dlq-entries-by-failure-code-${Environment}"
+            QueryString: |
+                fields @timestamp, tenantId, failureCode, eventId
+                | filter ispresent(failureCode)
+                | stats count(*) as count by failureCode
+                | sort count desc
+            LogGroupNames:
+                - !Sub "/aws/lambda/${ConsumerFunction}"
+                - !Sub "/aws/lambda/${ValidatorFunction}"
+                - !Sub "/aws/lambda/${WriterFunction}"
+
+    InsightQueryTopEventTypes:
+        Type: AWS::Logs::QueryDefinition
+        Properties:
+            Name: !Sub "streamcore/top-event-types-${Environment}"
+            QueryString: |
+                fields @timestamp, tenantId, eventType
+                | filter ispresent(eventType)
+                | stats count(*) as count by eventType
+                | sort count desc
+            LogGroupNames:
+                - !Sub "/aws/lambda/${EnricherFunction}"
+                - !Sub "/aws/lambda/${WriterFunction}"
+                - !Sub "/aws/lambda/${ConsumerFunction}"
+
     # Summary Lambda — daily reporting engine.
     # Queries EventsTable GSI-1 (never Scan) for each active tenant and
     # computes the FR-REP-02 aggregate. Triggered by EventBridge (T5.3);
