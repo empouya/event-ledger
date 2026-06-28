@@ -21,6 +21,7 @@ TENANT_TABLE     = os.environ["TENANT_CONFIG_TABLE"]
 REPORTS_TOPIC_ARN = os.environ.get("REPORTS_TOPIC_ARN", "")
 sns = boto3.client("sns")
 ses           = boto3.client("ses")
+cloudwatch = boto3.client("cloudwatch", region_name=os.environ.get("AWS_REGION", "eu-west-1"))
 SENDER_EMAIL  = os.environ.get("SENDER_EMAIL", "")
 OPS_EMAIL     = os.environ.get("OPS_EMAIL", "")
 
@@ -180,7 +181,7 @@ def _aggregate_tenant(tenant_id: str, report_date: str, config: dict) -> dict:
         "totalEvents":       total,
         "byEventType":       dict(type_counts),
         "processed":         processed,
-        "rejected":          "deferred to Phase 6",  # requires CW metrics
+        "rejected":          _get_rejected_count(tenant_id, report_date),
         "top5EventTypes":    top5,
         "latencyMs": {
             "p50": latency_p50,
@@ -212,6 +213,37 @@ def _compute_latencies(items: list) -> list:
         except (ValueError, AttributeError):
             continue
     return latencies
+
+
+def _get_rejected_count(tenant_id: str, report_date: str):
+    """
+    Queries CloudWatch for the ValidationFailures sum for this tenant on report_date.
+    Returns int on real AWS; returns None on LocalStack (no metric data) —
+    evaluation deferred to the real-AWS window (ADR-003).
+    """
+    start_time = datetime.strptime(report_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_time   = start_time + timedelta(days=1)
+    try:
+        resp = cloudwatch.get_metric_statistics(
+            Namespace="StreamCore/Pipeline",
+            MetricName="ValidationFailures",
+            Dimensions=[{"Name": "TenantId", "Value": tenant_id}],
+            StartTime=start_time,
+            EndTime=end_time,
+            Period=86400,
+            Statistics=["Sum"],
+        )
+        datapoints = resp.get("Datapoints", [])
+        if datapoints:
+            return int(sum(dp["Sum"] for dp in datapoints))
+        return None
+    except Exception as exc:
+        logger.warning(json.dumps({
+            "message": "CloudWatch get_metric_statistics failed; rejected count deferred",
+            "tenantId": tenant_id,
+            "error": str(exc),
+        }))
+        return None
 
 
 def _percentiles(values: list) -> tuple:
@@ -323,6 +355,8 @@ def _send_tenant_email(summary: dict) -> None:
     report_date  = summary.get("reportDate", "")
     subject      = f"StreamCore Daily Report - {display_name} - {report_date}"
     latency      = summary.get("latencyMs", {})
+    rejected_val = summary.get("rejected")
+    rejected_display = rejected_val if rejected_val is not None else "deferred"
 
     top5_text = "\n".join(
         f"  {i+1}. {e['eventType']}: {e['count']}"
@@ -340,7 +374,7 @@ def _send_tenant_email(summary: dict) -> None:
         f"Date:   {report_date}\n\n"
         f"Total events:  {summary.get('totalEvents', 0)}\n"
         f"Processed:     {summary.get('processed', 0)}\n"
-        f"Rejected:      {summary.get('rejected', 'deferred')}\n\n"
+        f"Rejected:      {rejected_display}\n\n"
         f"Top event types:\n{top5_text}\n\n"
         f"Pipeline latency:\n"
         f"  p50: {latency.get('p50')} ms\n"
@@ -353,7 +387,7 @@ def _send_tenant_email(summary: dict) -> None:
         f"<tr><th>Metric</th><th>Value</th></tr>"
         f"<tr><td>Total events</td><td>{summary.get('totalEvents', 0)}</td></tr>"
         f"<tr><td>Processed</td><td>{summary.get('processed', 0)}</td></tr>"
-        f"<tr><td>Rejected</td><td>{summary.get('rejected', 'deferred')}</td></tr>"
+        f"<tr><td>Rejected</td><td>{rejected_display}</td></tr>"
         f"<tr><td>p50 latency</td><td>{latency.get('p50')} ms</td></tr>"
         f"<tr><td>p99 latency</td><td>{latency.get('p99')} ms</td></tr>"
         f"</table>"

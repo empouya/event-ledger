@@ -2,6 +2,7 @@ import json
 import logging
 import uuid
 import os
+import time
 from datetime import datetime, timezone, timedelta
 
 import boto3
@@ -83,7 +84,7 @@ class ValidationError(Exception):
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _reject(failure_code: str, detail: str, event_id: str, event_type: str) -> None:
+def _reject(failure_code: str, detail: str, event_id: str, event_type: str, tenant_id: str = "") -> None:
     """
     Log the rejection reason (safe — no PII in these fields) and raise
     ValidationError so Step Functions routes to EventRejected.
@@ -95,6 +96,12 @@ def _reject(failure_code: str, detail: str, event_id: str, event_type: str) -> N
         "eventId": event_id,
         "eventType": event_type,
     }))
+
+    try:
+        _emit_validation_failure_metric(tenant_id, event_type, failure_code)
+    except Exception:
+        pass
+
     raise ValidationError(json.dumps({
         "failureCode": failure_code,
         "detail": detail,
@@ -188,6 +195,7 @@ def lambda_handler(event: dict, context) -> dict:
     """
     event_id   = event.get("eventId",   "")
     event_type = event.get("eventType", "")
+    tenant_id  = event.get("tenantId",  "")
 
     logger.info(json.dumps({
         "message": "validator invoked",
@@ -205,6 +213,7 @@ def lambda_handler(event: dict, context) -> dict:
             f"Event is {raw_bytes} bytes; limit is {MAX_EVENT_BYTES}",
             event_id,
             event_type,
+            tenant_id,
         )
 
     # ── eventId: must be UUID v4 ─────────────────────────────────────────────
@@ -214,6 +223,7 @@ def lambda_handler(event: dict, context) -> dict:
             f"eventId must be a UUID v4; received: '{event_id}'",
             event_id,
             event_type,
+            tenant_id,
         )
 
     # ── eventType: must be a registered type ─────────────────────────────────
@@ -223,6 +233,7 @@ def lambda_handler(event: dict, context) -> dict:
             f"eventType '{event_type}' is not registered",
             event_id,
             event_type,
+            tenant_id,
         )
 
     # ── Tenant's permitted event-type allow-list ────────────────────
@@ -230,7 +241,6 @@ def lambda_handler(event: dict, context) -> dict:
     # tenant may submit any registered event type (permissive default).
     # Runs after VAL-002 so we only check known types — no point filtering
     # an event type that would be rejected as UNKNOWN anyway.
-    tenant_id = event.get("tenantId", "")
     active_types = _get_active_event_types(tenant_id)
     if active_types and event_type not in active_types:
         _reject(
@@ -238,6 +248,7 @@ def lambda_handler(event: dict, context) -> dict:
             f"eventType '{event_type}' is not in the allow-list for tenant '{tenant_id}'",
             event_id,
             event_type,
+            tenant_id,
         )
 
     # ── schemaVersion: must match the current version ────────────────────────
@@ -248,6 +259,7 @@ def lambda_handler(event: dict, context) -> dict:
             f"schemaVersion must be '{CURRENT_SCHEMA_VERSION}'; received: '{schema_version}'",
             event_id,
             event_type,
+            tenant_id,
         )
 
     # ── clientTimestamp: must be a valid ISO 8601 UTC string ─────────────────
@@ -258,6 +270,7 @@ def lambda_handler(event: dict, context) -> dict:
             f"clientTimestamp is not a valid ISO 8601 UTC timestamp",
             event_id,
             event_type,
+            tenant_id,
         )
 
     # ── clientTimestamp: must not be more than 24 hours in the past ──────────
@@ -270,6 +283,7 @@ def lambda_handler(event: dict, context) -> dict:
             "clientTimestamp is more than 24 hours in the past",
             event_id,
             event_type,
+            tenant_id,
         )
 
     # ── clientTimestamp: must not be more than 5 minutes in the future ───────
@@ -280,6 +294,7 @@ def lambda_handler(event: dict, context) -> dict:
             "clientTimestamp is more than 5 minutes in the future",
             event_id,
             event_type,
+            tenant_id,
         )
 
     # ── payload: must be present and a JSON object ───────────────────────────
@@ -290,6 +305,7 @@ def lambda_handler(event: dict, context) -> dict:
             "payload must be a non-null JSON object",
             event_id,
             event_type,
+            tenant_id,
         )
 
     # ── Event-type-specific rules ─────────────────────────────────────────────
@@ -357,3 +373,25 @@ def _validate_payment_failed(payload: dict, event_id: str, event_type: str) -> N
             event_id,
             event_type,
         )
+
+
+def _emit_validation_failure_metric(tenant_id: str, event_type: str, failure_code: str) -> None:
+    emf = {
+        "_aws": {
+            "Timestamp": int(time.time() * 1000),
+            "CloudWatchMetrics": [
+                {
+                    "Namespace": "StreamCore/Pipeline",
+                    "Dimensions": [["TenantId", "EventType"]],
+                    "Metrics": [
+                        {"Name": "ValidationFailures", "Unit": "Count"},
+                    ],
+                }
+            ],
+        },
+        "TenantId": tenant_id,
+        "EventType": event_type,
+        "FailureCode": failure_code,
+        "ValidationFailures": 1,
+    }
+    print(json.dumps(emf))

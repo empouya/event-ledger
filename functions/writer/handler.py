@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone, timedelta
 
 import boto3
@@ -97,6 +98,7 @@ def lambda_handler(event: dict, context) -> dict:
             "pk": pk,
             "sk": sk,
         }))
+        _emit_events_processed_metric(tenant_id, event_type)
     except ClientError as e:
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
             # Item with this PK+SK already exists — this is a retry or duplicate
@@ -153,3 +155,24 @@ def lambda_handler(event: dict, context) -> dict:
     }))
 
     return event
+
+
+def _emit_events_processed_metric(tenant_id: str, event_type: str) -> None:
+    emf = {
+        "_aws": {
+            "Timestamp": int(time.time() * 1000),
+            "CloudWatchMetrics": [
+                {
+                    "Namespace": "StreamCore/Pipeline",
+                    "Dimensions": [["TenantId", "EventType"]],
+                    "Metrics": [
+                        {"Name": "EventsProcessed", "Unit": "Count"},
+                    ],
+                }
+            ],
+        },
+        "TenantId": tenant_id,
+        "EventType": event_type,
+        "EventsProcessed": 1,
+    }
+    print(json.dumps(emf))

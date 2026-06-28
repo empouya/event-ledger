@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 from aws_xray_sdk.core import xray_recorder, patch_all
@@ -39,6 +40,19 @@ def lambda_handler(event: dict, context) -> dict:
         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     )
 
+    tenant_id   = event.get("tenantId",  "")
+    event_type  = event.get("eventType", "")
+    ingested_at = event.get("ingestedAt", "")
+    try:
+        if ingested_at:
+            t_in  = datetime.fromisoformat(ingested_at.replace("Z", "+00:00"))
+            t_out = datetime.fromisoformat(processed_at.replace("Z", "+00:00"))
+            latency_ms = int((t_out - t_in).total_seconds() * 1000)
+            if latency_ms >= 0:
+                _emit_processing_latency_metric(tenant_id, event_type, latency_ms)
+    except Exception:
+        pass
+
     result = {
         **event,
         "processedAt": processed_at,
@@ -55,3 +69,24 @@ def lambda_handler(event: dict, context) -> dict:
     }))
 
     return result
+
+
+def _emit_processing_latency_metric(tenant_id: str, event_type: str, latency_ms: int) -> None:
+    emf = {
+        "_aws": {
+            "Timestamp": int(time.time() * 1000),
+            "CloudWatchMetrics": [
+                {
+                    "Namespace": "StreamCore/Pipeline",
+                    "Dimensions": [["TenantId", "EventType"]],
+                    "Metrics": [
+                        {"Name": "ProcessingLatencyMs", "Unit": "Milliseconds"},
+                    ],
+                }
+            ],
+        },
+        "TenantId": tenant_id,
+        "EventType": event_type,
+        "ProcessingLatencyMs": latency_ms,
+    }
+    print(json.dumps(emf))
