@@ -97,7 +97,16 @@ if ($invokeResult.StatusCode -eq 200 -and -not $funcError) { Pass "Consumer Lamb
 else { Fail "Consumer Lambda" "StatusCode=$($invokeResult.StatusCode) FunctionError=$funcError" }
 
 Write-Host "    waiting for state machine..."
-Start-Sleep -Seconds 20
+$smPollSecs = 0
+do {
+    Start-Sleep -Seconds 5
+    $smPollSecs += 5
+    $smPollExec = (awslocal stepfunctions list-executions `
+        --state-machine-arn $smArn `
+        --output json | ConvertFrom-Json).executions |
+        Where-Object { $_.name -eq $ingestionId } | Select-Object -First 1
+} while ($smPollExec -and $smPollExec.status -eq "RUNNING" -and $smPollSecs -lt 90)
+Write-Host "    SM settled after ${smPollSecs}s (status: $($smPollExec.status))"
 
 # =============================================================================
 # 5. STATE MACHINE: ASSERT SUCCEEDED

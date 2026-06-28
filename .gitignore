@@ -15,6 +15,9 @@ venv/
 # dev-up.ps1 IS committed (the shared bring-up script). Keep personal overrides here:
 dev-env.local.ps1
 task-test.ps1
+dev-deploy.ps1
+dev-post-deploy.ps1
+dev-prep.ps1
 
 # IDE files — personal editor settings, irrelevant to teammates
 .vscode/
