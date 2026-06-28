@@ -90,6 +90,7 @@ Resources:
     StreamCoreApi:
         Type: AWS::Serverless::Api
         Properties:
+            Name: !Sub "streamcore-api-${Environment}"
             StageName: !Ref Environment   # URL will be: .../dev/health
             TracingEnabled: true
             Auth:
@@ -817,6 +818,9 @@ Resources:
                           - ses:SendEmail
                           - ses:SendRawEmail
                       Resource: "*"
+                    - Effect: Allow
+                      Action: cloudwatch:GetMetricStatistics
+                      Resource: "*"
 
     # ── Summary schedule DLQ ────────────────────────────────────────────────
     SummaryScheduleDLQ:
@@ -879,6 +883,176 @@ Resources:
                   Value: StreamCore
                 - Key: Environment
                   Value: !Ref Environment
+
+    PipelineHealthDashboard:
+        Type: AWS::CloudWatch::Dashboard
+        Properties:
+            DashboardName: !Sub "StreamCore-Pipeline-Health-${Environment}"
+            DashboardBody: !Sub |
+                {
+                  "widgets": [
+                    {
+                      "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+                      "properties": {
+                        "title": "Kinesis Iterator Age (ms)",
+                        "metrics": [["AWS/Kinesis","GetRecords.IteratorAgeMilliseconds","StreamName","${EventStream}"]],
+                        "period": 60, "stat": "Maximum", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+                      "properties": {
+                        "title": "Kinesis Incoming Records",
+                        "metrics": [["AWS/Kinesis","IncomingRecords","StreamName","${EventStream}"]],
+                        "period": 60, "stat": "Sum", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 0, "y": 6, "width": 12, "height": 6,
+                      "properties": {
+                        "title": "Lambda Invocations (pipeline)",
+                        "metrics": [
+                          ["AWS/Lambda","Invocations","FunctionName","${ValidatorFunction}"],
+                          [".",".",".","${PiiExtractorFunction}"],
+                          [".",".",".","${EnricherFunction}"],
+                          [".",".",".","${WriterFunction}"]
+                        ],
+                        "period": 60, "stat": "Sum", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 12, "y": 6, "width": 12, "height": 6,
+                      "properties": {
+                        "title": "Lambda Errors (pipeline)",
+                        "metrics": [
+                          ["AWS/Lambda","Errors","FunctionName","${ValidatorFunction}"],
+                          [".",".",".","${PiiExtractorFunction}"],
+                          [".",".",".","${EnricherFunction}"],
+                          [".",".",".","${WriterFunction}"]
+                        ],
+                        "period": 60, "stat": "Sum", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 0, "y": 12, "width": 12, "height": 6,
+                      "properties": {
+                        "title": "Lambda Duration p99 (ms)",
+                        "metrics": [
+                          ["AWS/Lambda","Duration","FunctionName","${IngestFunction}"],
+                          [".",".",".","${ValidatorFunction}"],
+                          [".",".",".","${PiiExtractorFunction}"],
+                          [".",".",".","${EnricherFunction}"],
+                          [".",".",".","${WriterFunction}"]
+                        ],
+                        "period": 60, "stat": "p99", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 12, "y": 12, "width": 12, "height": 6,
+                      "properties": {
+                        "title": "Lambda Throttles",
+                        "metrics": [
+                          ["AWS/Lambda","Throttles","FunctionName","${IngestFunction}"],
+                          [".",".",".","${ConsumerFunction}"],
+                          [".",".",".","${ValidatorFunction}"],
+                          [".",".",".","${PiiExtractorFunction}"],
+                          [".",".",".","${EnricherFunction}"],
+                          [".",".",".","${WriterFunction}"]
+                        ],
+                        "period": 60, "stat": "Sum", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 0, "y": 18, "width": 12, "height": 6,
+                      "properties": {
+                        "title": "DynamoDB Request Latency (ms)",
+                        "metrics": [
+                          ["AWS/DynamoDB","SuccessfulRequestLatency","TableName","${EventsTable}","Operation","PutItem"],
+                          [".",".",".","${EventsTable}","Operation","Query"]
+                        ],
+                        "period": 60, "stat": "Average", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 12, "y": 18, "width": 12, "height": 6,
+                      "properties": {
+                        "title": "DynamoDB Throttled Requests",
+                        "metrics": [
+                          ["AWS/DynamoDB","WriteThrottleEvents","TableName","${EventsTable}"],
+                          [".","ReadThrottleEvents",".","."]
+                        ],
+                        "period": 60, "stat": "Sum", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 0, "y": 24, "width": 12, "height": 6,
+                      "properties": {
+                        "title": "DLQ Depths",
+                        "metrics": [
+                          ["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${ValidationDLQ.QueueName}"],
+                          [".",".",".","${PersistenceDLQ.QueueName}"]
+                        ],
+                        "period": 60, "stat": "Maximum", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 12, "y": 24, "width": 12, "height": 6,
+                      "properties": {
+                        "title": "Step Functions Failures",
+                        "metrics": [["AWS/States","ExecutionsFailed","StateMachineArn","${ProcessingStateMachine}"]],
+                        "period": 60, "stat": "Sum", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 0, "y": 30, "width": 8, "height": 6,
+                      "properties": {
+                        "title": "Events Processed",
+                        "metrics": [["StreamCore/Pipeline","EventsProcessed"]],
+                        "period": 300, "stat": "Sum", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 8, "y": 30, "width": 8, "height": 6,
+                      "properties": {
+                        "title": "Validation Failures",
+                        "metrics": [["StreamCore/Pipeline","ValidationFailures"]],
+                        "period": 300, "stat": "Sum", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 16, "y": 30, "width": 8, "height": 6,
+                      "properties": {
+                        "title": "Processing Latency p99 (ms)",
+                        "metrics": [["StreamCore/Pipeline","ProcessingLatencyMs"]],
+                        "period": 300, "stat": "p99", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 0, "y": 36, "width": 8, "height": 6,
+                      "properties": {
+                        "title": "API Gateway 4XX",
+                        "metrics": [["AWS/ApiGateway","4XXError","ApiName","streamcore-api-${Environment}","Stage","${Environment}"]],
+                        "period": 60, "stat": "Sum", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 8, "y": 36, "width": 8, "height": 6,
+                      "properties": {
+                        "title": "API Gateway 5XX",
+                        "metrics": [["AWS/ApiGateway","5XXError","ApiName","streamcore-api-${Environment}","Stage","${Environment}"]],
+                        "period": 60, "stat": "Sum", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    },
+                    {
+                      "type": "metric", "x": 16, "y": 36, "width": 8, "height": 6,
+                      "properties": {
+                        "title": "API Gateway Latency p99 (ms)",
+                        "metrics": [["AWS/ApiGateway","Latency","ApiName","streamcore-api-${Environment}","Stage","${Environment}"]],
+                        "period": 60, "stat": "p99", "view": "timeSeries", "region": "${AWS::Region}"
+                      }
+                    }
+                  ]
+                }
 
 Outputs:
     ProcessingStateMachineArn:
