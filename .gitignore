@@ -1,6 +1,6 @@
 # SAM build output — generated every time you run sam build, never commit it
 .aws-sam/
-
+.claude/
 # Python bytecode — compiled cache files Python generates automatically
 __pycache__/
 *.py[cod]
@@ -12,12 +12,10 @@ venv/
 # Secrets and environment config — never commit credentials
 .env
 .env.*
-# dev-up.ps1 IS committed (the shared bring-up script). Keep personal overrides here:
-dev-env.local.ps1
-task-test.ps1
-dev-deploy.ps1
-dev-post-deploy.ps1
-dev-prep.ps1
+# personal deployment scripts — not relevant to teammates
+dev-deploy.sh
+dev-post-deploy.sh
+dev-prep.sh
 
 # IDE files — personal editor settings, irrelevant to teammates
 .vscode/
